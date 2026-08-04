@@ -19,7 +19,8 @@ struct Args {
     config_file: Option<String>,
 }
 
-fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
+fn setup_tracing() -> Result<opentelemetry_sdk::trace::SdkTracerProvider, Box<dyn std::error::Error>>
+{
     // Initialize OpenTelemetry tracing
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
@@ -52,7 +53,9 @@ fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 
-    Ok(())
+    // Hand the provider back so run() can shut it down: dropping it here
+    // would strand up to a full batch interval of spans on SIGTERM.
+    Ok(tracer_provider)
 }
 
 fn setup_signal_handler() -> tokio::sync::oneshot::Receiver<()> {
@@ -82,7 +85,7 @@ fn setup_signal_handler() -> tokio::sync::oneshot::Receiver<()> {
 
 async fn run(config: config::Config) -> Result<(), Box<dyn std::error::Error>> {
     // Setup tracing and OpenTelemetry
-    setup_tracing()?;
+    let tracer_provider = setup_tracing()?;
 
     // Build the router
     let app = routes::build_router(&config.redis_url).await?;
@@ -101,6 +104,12 @@ async fn run(config: config::Config) -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("graceful shutdown initiated");
         })
         .await?;
+
+    // Flush buffered spans before exit — the batch exporter holds up to a
+    // full interval of spans that would otherwise be dropped on SIGTERM.
+    if let Err(error) = tracer_provider.shutdown() {
+        tracing::warn!(%error, "tracer provider shutdown failed; final spans may be lost");
+    }
 
     tracing::info!("server shutdown complete");
     Ok(())
