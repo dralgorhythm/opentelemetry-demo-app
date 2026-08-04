@@ -73,7 +73,22 @@ jobs:
               || { echo "::error::$envf must name the otel-demo-app-${env}/app/config secret"; exit 1; }
             grep -q -- '/mnt/secrets-store/config.yml' <<<"$out"
             grep -q 'kubernetes.io/arch: amd64' <<<"$out"
-            echo "rendered $env ✓"
+            # The ALB health check and the kubelet probes must stay on the
+            # SAME dependency-free path (DECISIONS #15). Asserted rather than
+            # trusted because the failure is silent and expensive: dropping
+            # the annotation reverts the ALB to GET /, which here is a Redis
+            # WRITE per check and converts a Redis blip into a 503 by
+            # ejecting every target at once. Compares the two rendered values
+            # to each other, so it follows .Values.probePath instead of
+            # pinning a literal.
+            # Character classes exclude , and } — the probes render in flow
+            # style ({ httpGet: { path: /healthz, port: http } }), so a plain
+            # \S+ captures "/healthz," and never matches the annotation.
+            hc=$(grep -oE 'healthcheck-path: [^,}[:space:]]+' <<<"$out" | head -1 | awk '{print $2}')
+            pp=$(grep -oE 'livenessProbe: \{ httpGet: \{ path: [^,}[:space:]]+' <<<"$out" | head -1 | awk '{print $NF}')
+            [ -n "$hc" ] && [ "$hc" = "$pp" ] \
+              || { echo "::error::$envf: ALB healthcheck-path ('$hc') must equal the probe path ('$pp')"; exit 1; }
+            echo "rendered $env ✓ (probe+ALB health check both $hc)"
           done
       # The only gate that ever looks at the scripts in this repo.
       - run: shellcheck scripts/*.sh
