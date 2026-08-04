@@ -5,8 +5,11 @@ edition = "2021"
 
 [dependencies]
 axum = "0.8.4"
-redis = "0.32.2"
-bb8 = "0.8"
+# bb8-redis 0.18 exposes no feature flags, so TLS is enabled by feature
+# unification: this direct dep resolves to the SAME redis 0.27.x that
+# bb8-redis re-exports (the code imports via bb8_redis::redis) and turns on
+# rustls, which rediss:// URLs (ElastiCache in-transit encryption) require.
+redis = { version = "0.27.6", features = ["tokio-rustls-comp"] }
 bb8-redis = "0.18"
 tracing = "0.1.41"
 tracing-opentelemetry = "0.31.0"

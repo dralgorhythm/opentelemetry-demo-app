@@ -36,7 +36,11 @@ impl Config {
                 Ok(config)
             }
             Err(e) => {
-                tracing::error!("Error reading config file {}: {}", path, e);
+                // eprintln, not tracing: this runs before any subscriber is
+                // installed (main loads config before run() calls
+                // setup_tracing), so a tracing::error here vanishes and a bad
+                // config mount crash-loops with empty logs.
+                eprintln!("Error reading config file {}: {}", path, e);
                 Err(Box::new(e))
             }
         }

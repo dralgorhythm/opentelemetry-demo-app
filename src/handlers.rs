@@ -6,6 +6,14 @@ use bb8_redis::{bb8, redis::AsyncCommands, RedisConnectionManager};
 use std::sync::Arc;
 use tracing::Instrument;
 
+// Dependency-free on purpose: liveness/readiness must not couple pod health
+// to Redis availability (a dependency outage that restarts pods or empties
+// every endpoint from rotation makes the blip worse, and GET / already
+// reports it honestly as a 500).
+pub async fn healthz() -> &'static str {
+    "ok"
+}
+
 pub async fn hello_world(
     axum::extract::State(pool): axum::extract::State<Arc<bb8::Pool<RedisConnectionManager>>>,
 ) -> Response {
