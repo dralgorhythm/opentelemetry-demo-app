@@ -21,10 +21,25 @@ variable "alert_email" {
 
 variable "monthly_budget_usd" {
   type = number
-  # Account-total ceiling; the per-env tag-filtered budgets below carry the
-  # fine-grained tripwires (default $25 per env, override via the
-  # environments map).
-  default = 50
+  # Account-total ceiling, sized to the repo's own cost math: DECISIONS #17
+  # puts one continuously deployed env at ~$120+/mo (NAT + EKS control
+  # plane + nodes), so $200 leaves headroom for the shared stack and spikes
+  # while keeping a breach MEANINGFUL — it signals a teardown leak or a
+  # runaway, not the documented steady state. The per-env tag-filtered
+  # budgets below carry the fine-grained tripwires (default $150 per env,
+  # override via the environments map).
+  default = 200
+}
+
+# One alert schedule for every budget (see the notification rationale on
+# aws_budgets_budget.monthly): two ACTUAL checkpoints for a slow burn, one
+# FORECASTED for a fast one.
+locals {
+  budget_alerts = [
+    { threshold = 50, type = "ACTUAL" },
+    { threshold = 90, type = "ACTUAL" },
+    { threshold = 100, type = "FORECASTED" },
+  ]
 }
 
 # Flat monthly ceiling. Three notifications on purpose: two ACTUAL
@@ -45,28 +60,15 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
 
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 50
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "ACTUAL"
-    subscriber_email_addresses = [var.alert_email]
-  }
-
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 90
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "ACTUAL"
-    subscriber_email_addresses = [var.alert_email]
-  }
-
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 100
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "FORECASTED"
-    subscriber_email_addresses = [var.alert_email]
+  dynamic "notification" {
+    for_each = local.budget_alerts
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value.threshold
+      threshold_type             = "PERCENTAGE"
+      notification_type          = notification.value.type
+      subscriber_email_addresses = [var.alert_email]
+    }
   }
 }
 
@@ -92,27 +94,14 @@ resource "aws_budgets_budget" "env_monthly" {
     values = [format("user:Environment$%s", each.key)]
   }
 
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 50
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "ACTUAL"
-    subscriber_email_addresses = [var.alert_email]
-  }
-
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 90
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "ACTUAL"
-    subscriber_email_addresses = [var.alert_email]
-  }
-
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 100
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "FORECASTED"
-    subscriber_email_addresses = [var.alert_email]
+  dynamic "notification" {
+    for_each = local.budget_alerts
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value.threshold
+      threshold_type             = "PERCENTAGE"
+      notification_type          = notification.value.type
+      subscriber_email_addresses = [var.alert_email]
+    }
   }
 }
