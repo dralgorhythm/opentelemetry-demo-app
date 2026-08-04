@@ -42,6 +42,28 @@ autoscaling:
 # spread is SOFT. Pair with the PDB on anything customer-facing.
 topologySpread:
   enabled: false
+  # How many hostname domains the HARD spread constraint must see. 2 is the
+  # difference between "spread if the cluster happens to have room" and
+  # "there must be a second node".
+  #
+  # Without it the constraint is VACUOUS on a one-node cluster: a single node
+  # is a single topology domain, so the skew is 0 and DoNotSchedule is
+  # trivially satisfied — every replica lands on that one node, which is the
+  # single point of failure the spread exists to prevent. Measured live: 2
+  # replicas, 1 node, both co-located.
+  #
+  # With minDomains: 2 the absent domain counts as 0, so a second replica on
+  # the same node computes a skew of 2 (> maxSkew 1) and stays Pending — and
+  # THAT is the unschedulable pod that makes Karpenter provision node two.
+  #
+  # Cost: a second node, permanently. It comes from the spot pool first
+  # (deploy/cluster/spot-nodepool.yaml, weight 100), with on-demand
+  # general-purpose as the fallback if spot is unavailable for the requested
+  # shapes — which is exactly why that built-in pool stays enabled.
+  #
+  # Set to null to opt out (single-node, cheaper, no HA). Only meaningful
+  # with whenUnsatisfiable: DoNotSchedule; k8s 1.30+ (GA).
+  minDomains: 2
 
 # Node pinning. Empty = the scheduler's choice (Auto Mode). The concrete use
 # here: single-arch images pin their architecture (the Auto Mode
