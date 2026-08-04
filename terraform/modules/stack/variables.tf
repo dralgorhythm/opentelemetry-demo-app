@@ -1,8 +1,3 @@
-variable "region" {
-  type    = string
-  default = "us-east-1"
-}
-
 variable "project" {
   type    = string
   default = "otel-demo-app"
@@ -87,6 +82,25 @@ variable "alb_5xx_threshold" {
 variable "alb_latency_threshold_seconds" {
   type    = number
   default = 0.5
+}
+
+# ELB-generated 5xx (LB-level failures: no healthy targets, timeouts,
+# rejected connections) — the worst-outage signal, separate knob from the
+# target-origin count above.
+variable "alb_elb_5xx_threshold" {
+  type    = number
+  default = 10
+}
+
+# ── ElastiCache alarm thresholds (alerting.tf) ─────────────────────────────
+variable "redis_memory_threshold_percent" {
+  type    = number
+  default = 80
+}
+
+variable "redis_engine_cpu_threshold_percent" {
+  type    = number
+  default = 90
 }
 
 # ── ElastiCache Redis knobs (elasticache.tf) ────────────────────────────────

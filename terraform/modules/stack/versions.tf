@@ -12,6 +12,11 @@ terraform {
   }
 }
 
+# The region every regional reference in this module derives from — the
+# inherited provider's, looked up here instead of a variable that could
+# silently diverge from the provider the env root actually configured.
+data "aws_region" "current" {}
+
 data "aws_availability_zones" "available" {
   filter {
     name   = "opt-in-status"

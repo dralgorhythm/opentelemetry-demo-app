@@ -38,18 +38,9 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-locals {
-  # By convention, not remote state: bootstrap creates
-  # <project>-<env>-boundary; the env root derives the ARN from the name
-  # (the repo's cross-stack wire is outputs -> gh variables / naming
-  # convention, never state coupling).
-  boundary_arn = var.enable_permissions_boundary ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project}-${var.environment}-boundary" : ""
-}
-
 module "stack" {
   source = "../../modules/stack"
 
-  region              = var.region
   project             = var.project
   environment         = var.environment
   admin_principal_arn = var.admin_principal_arn
@@ -57,5 +48,11 @@ module "stack" {
 
   vpc_cidr = "10.0.0.0/16" # dev's block; staging/prod take 10.1/10.2
 
-  iam_permissions_boundary_arn = local.boundary_arn
+  # By convention, not remote state: bootstrap creates
+  # <project>-<env>-boundary; the env root derives the ARN from the name
+  # (the repo's cross-stack wire is outputs -> gh variables / naming
+  # convention, never state coupling). Threaded UNCONDITIONALLY, same as
+  # staging/prod: this root is only ever applied by the bounded dev CI role
+  # the bootstrap apply creates, so the boundary always exists first.
+  iam_permissions_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project}-${var.environment}-boundary"
 }

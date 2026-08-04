@@ -38,7 +38,6 @@ data "aws_caller_identity" "current" {}
 module "stack" {
   source = "../../modules/stack"
 
-  region              = var.region
   project             = var.project
   environment         = var.environment
   admin_principal_arn = var.admin_principal_arn

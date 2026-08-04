@@ -14,7 +14,7 @@
 # low traffic), so the per-AZ hourly cost isn't yet justified.
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = module.vpc.vpc_id
-  service_name      = "com.amazonaws.${var.region}.s3"
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = module.vpc.private_route_table_ids
 }

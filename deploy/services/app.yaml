@@ -54,4 +54,8 @@ env:
   # OTLP gRPC to the ADOT collector (deploy/cluster/otel-collector.yaml),
   # which lives in the default namespace.
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.default.svc.cluster.local:4317
+  # Trace identity = the roster identity ("app": release, SA, ECR suffix),
+  # not the crate name — X-Ray's service map and the smoke trace gate both
+  # key on this.
+  OTEL_SERVICE_NAME: app
   RUST_LOG: info
