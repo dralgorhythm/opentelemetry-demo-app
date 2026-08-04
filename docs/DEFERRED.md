@@ -1,0 +1,98 @@
+# Deferred work
+
+What we'd do next, deliberately not built for the assignment. Each item: why
+it matters, and the first concrete step. Companion to
+[DECISIONS.md](./DECISIONS.md) — these are the roads not yet taken, not the
+forks already chosen.
+
+## Edge & network
+
+- **TLS + DNS at the edge.** The ALB is HTTP-only because certs need a domain
+  decision first. First step: Route53 zone + ACM cert in the stack module,
+  then the chart's existing `ingress.certificateARNs` knob (IngressClassParams
+  carries it) plus an HTTPS listener with HTTP→HTTPS redirect.
+- **Private EKS API endpoint.** Public today for laptop + hosted-runner
+  convenience (`endpoint_public_access` in `terraform/modules/stack/eks.tf`).
+  First step: pin `endpoint_public_access_cidrs` to known ranges; the full
+  fix is a private endpoint + VPN/bastion, which also forces self-hosted or
+  VPC-peered CI runners.
+- **NetworkPolicies.** The chart ships a `networkpolicy.yaml` template,
+  unused. First step: enable the policy controller (vpc-cni configuration)
+  and set default-deny + explicit app→collector/app→DNS allows — then prove
+  enforcement with a blocked request, since an unenforced policy reads
+  identically to an enforced one.
+
+## Multi-environment
+
+- **Promotion to staging/prod.** The roots, CIDR plan, and state keys exist;
+  the roles don't. First step: add the envs to
+  `terraform/bootstrap/environments.tfvars`, re-apply bootstrap locally,
+  create protected GitHub environments, then a `promote.yml` that deploys the
+  **same immutable image SHA** dev smoked — build once, promote by digest
+  (the shared ECR was account-scoped for exactly this).
+- **PR preview environments.** Ephemeral `pr-*` namespaces with their own
+  bounded OIDC role. First step: a preview role in bootstrap plus a
+  PR-triggered deploy/teardown pair keyed on the PR number.
+
+## Data & secrets
+
+- **Redis HA.** One variable: `redis_num_cache_clusters > 1` flips automatic
+  failover + multi-AZ together. Dev runs 1 node for cost.
+- **AUTH-token rotation.** The token lives in Terraform state (accepted,
+  documented trade). First step: a Secrets Manager rotation Lambda owning the
+  token, with Terraform ignoring the secret value — rotation stops being
+  `terraform apply -replace=random_password.redis_auth` and the token leaves
+  state entirely.
+- **Valkey.** ~20% cheaper, drop-in for this INCRBY workload; kept Redis
+  because the prompt named it. First step: `engine = "valkey"` + engine
+  version in the replication group.
+
+## Supply chain & encryption
+
+- **Image signing + provenance.** First step: cosign keyless signing in the
+  deploy job after push, then an admission check; SLSA provenance via the
+  build-push action's attestation support.
+- **Image scanning as a gate.** ECR scan-on-push is on and Trivy scans the
+  *filesystem* in CI; the built image itself isn't gated. First step: a Trivy
+  `image` scan step between build and push.
+- **KMS CMKs.** State bucket, log groups, ElastiCache at-rest, and Secrets
+  Manager ride AWS-managed keys. First step: one project CMK + key policy in
+  bootstrap, threaded through as a variable.
+- **cargo-deny.** `cargo audit` gates vulnerabilities but not licenses or
+  duplicate/yanked crates. First step: `deny.toml` + a CI step.
+
+## Scale & cost
+
+- **Spot capacity.** A custom Auto Mode NodePool (weight over
+  `general-purpose`) cuts node cost ~70%; the 2-replica + PDB + spread floor
+  already absorbs reclaims. First step: `deploy/cluster/spot-nodepool.yaml`
+  with amd64-pinned C/M/R instance requirements.
+- **HPA + load testing.** The chart has an `hpa.yaml` template; resource
+  requests are folklore until measured. First step: a k6/vegeta run against
+  the ALB to find the loaded steady-state, then set requests and enable the
+  HPA at 70% CPU (metrics-server is already installed).
+
+## Observability
+
+- **JSON log formatter.** Honest gap: the saved Logs Insights queries and the
+  dashboard's p95 row (`terraform/modules/stack/alerting.tf`) parse
+  `log_processed.fields.*`, but the app emits human-readable text logs today
+  — those queries return empty until the app switches to
+  `tracing_subscriber`'s JSON formatter and logs a structured
+  "HTTP request completed" event with `latency_ms`/`status_code`. The infra
+  side is deliberately already correct.
+- **Trace context + version stamping.** No W3C propagator is registered
+  (inbound traceparent headers start new traces) and the app doesn't report
+  `service.version`, so the smoke gate can't assert "this SHA is serving."
+  First step: set the propagator and stamp `service.version` from build env
+  in `setup_tracing()`, add the version to `/healthz`, then an `EXPECT_SHA`
+  check in `scripts/smoke.sh`.
+
+## Operations
+
+- **Runbook.** The durable rollback is a **revert PR** (every merge to main
+  re-asserts itself); `helm rollback app <rev> -n otel-demo` is the stopgap,
+  and the deploy job prints the revision table in its run summary for exactly
+  that. First step: write the rollback, Redis-outage, and
+  ALB-not-provisioning drills down as `docs/runbook.md` with the commands
+  already scattered through workflow comments.
