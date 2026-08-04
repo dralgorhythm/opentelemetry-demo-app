@@ -102,4 +102,4 @@ Or build the release binary with `cargo build --release` and run
 | `deploy/cluster/` | cluster-scoped YAML (ADOT collector) |
 | `scripts/` | `roster.sh` (the roster's one parser), `smoke.sh` (the deploy gate) |
 | `.github/workflows/` | `ci.yml` (gates → infra → deploy → release), `destroy.yml` |
-| `docs/` | [bootstrap](docs/bootstrap.md) · [decisions](docs/DECISIONS.md) · [deferred work](docs/DEFERRED.md) |
+| `docs/` | [bootstrap](docs/bootstrap.md) · [decisions](docs/DECISIONS.md) · [deferred work](docs/DEFERRED.md) · [demo cheat sheet](docs/demo-cheatsheet.md) |
