@@ -9,11 +9,16 @@
 #
 #   scripts/smoke.sh cloud    # the live stack through the ALB (CI's deploy gate)
 #
+#   EXPECT_SHA=<sha> scripts/smoke.sh cloud   # also assert WHICH build serves
+#
+# EXPECT_SHA is what makes "deploy green but the old version is serving"
+# fail instead of pass: /healthz answers "ok <build-sha>", baked into the
+# binary at image build time (Dockerfile BUILD_SHA -> option_env! in
+# src/main.rs). Optional on purpose — a laptop run against an unstamped or
+# hand-built image should still be able to smoke the stack.
+#
 # The mode arg is kept for future postures (local/preview — the template
-# this derives from has them; this app runs cloud-only for now). No
-# EXPECT_SHA: the app has no version stamp yet (deferred with
-# service.version) — "deploy green but old version serving" is currently
-# only caught by helm's own rollout tracking.
+# this derives from has them; this app runs cloud-only for now).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -82,6 +87,14 @@ case "$mode" in
     # below are two different claims, and both get asserted.
     expect_status   "healthz"                200 "http://$HOST/healthz"
     expect_contains "healthz body"           "ok" "http://$HOST/healthz"
+    # The served-build assert. Skipped (not failed) without EXPECT_SHA so a
+    # laptop run stays useful; when CI sets it, a stale ReplicaSet still
+    # answering behind the ALB turns this red.
+    if [[ -n "${EXPECT_SHA:-}" ]]; then
+      expect_contains "healthz reports the expected build" "$EXPECT_SHA" "http://$HOST/healthz"
+    else
+      echo "  i EXPECT_SHA unset — not asserting which build is serving"
+    fi
     expect_status   "greeting serves"        200 "http://$HOST/"
     expect_contains "greeting text"          "Hello, World! You are visitor number" "http://$HOST/"
     # The Redis round trip: INCRBY on every / hit, so two reads must be

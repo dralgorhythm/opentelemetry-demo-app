@@ -940,6 +940,7 @@ dependencies = [
  "http",
  "hyper",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "redis",

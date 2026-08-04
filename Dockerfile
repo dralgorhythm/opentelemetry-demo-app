@@ -18,6 +18,13 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
  && cargo build --release --locked --target x86_64-unknown-linux-musl \
  && rm -rf src target/x86_64-unknown-linux-musl/release/deps/opentelemetry_demo_app*
 COPY src ./src
+# The build stamp, baked in via option_env!("BUILD_SHA") (src/main.rs).
+# Declared HERE, after the dependency layer, on purpose: an ARG that changes
+# every commit would invalidate every layer below it, so putting this above
+# the `cargo build --release` of the deps would defeat the whole dependency
+# cache. Defaults to "dev" so a bare `docker build .` still works.
+ARG BUILD_SHA=dev
+ENV BUILD_SHA=${BUILD_SHA}
 RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
 FROM cgr.dev/chainguard/static:latest@sha256:399c8cb4858f05aaa33f43f02a2e75f28d40f016c0f86e5ba6075769e3303791

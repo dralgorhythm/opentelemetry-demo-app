@@ -40,12 +40,11 @@ forks already chosen.
   `terraform/envs/<env>` root. The remaining work is *operational*, not
   code — the bootstrap re-apply and the protected GitHub Environments are
   manual by design (see `docs/bootstrap.md` § Adding an environment).
-- **A build stamp (`EXPECT_SHA`).** `promote.yml` can prove the target
-  environment is healthy but not that the *promoted SHA* is the one serving
-  — the app self-reports no build, so `helm --wait --atomic` is the only
-  thing backing that claim. First step: a build-arg SHA surfaced in the
-  greeting or a `/version` route, then `EXPECT_SHA=$SHA scripts/smoke.sh
-  cloud` in both deploy gates. Tracked with `service.version`.
+- ~~**A build stamp (`EXPECT_SHA`).**~~ Landed: the commit rides a
+  `BUILD_SHA` docker build-arg into `option_env!`, surfaces on `/healthz`
+  and as `service.version` on every span, and both deploy gates assert it.
+  `promote.yml` can now prove the *promoted* SHA is the one serving, not
+  merely that the environment is healthy.
 - **Prod posture.** `terraform/envs/prod` is configuration-identical to
   staging today. The prod-specific upgrades (per-AZ NAT via
   `single_nat_gateway = false`, tighter alarm thresholds, ACM certs +
@@ -127,12 +126,13 @@ forks already chosen.
   `OpenTelemetrySpanExt::context()`) that records the current span's
   trace id onto the event, then a `trace_id` column in the
   `errors-recent` saved query.
-- **Trace context + version stamping.** No W3C propagator is registered
-  (inbound traceparent headers start new traces) and the app doesn't report
-  `service.version`, so the smoke gate can't assert "this SHA is serving."
-  First step: set the propagator and stamp `service.version` from build env
-  in `setup_tracing()`, add the version to `/healthz`, then an `EXPECT_SHA`
-  check in `scripts/smoke.sh`.
+- ~~**Trace context + version stamping.**~~ Landed: `TraceContextPropagator`
+  is registered globally and the middleware extracts the inbound W3C
+  `traceparent`, so a request arriving with a caller's context joins that
+  trace instead of starting an unrelated one; `service.version` rides every
+  span. What remains is the *outbound* half — this app makes no HTTP calls
+  of its own, so nothing injects a `traceparent` yet. A second service is
+  the trigger, and the propagator is already global for exactly that.
 
 ## Operations
 
