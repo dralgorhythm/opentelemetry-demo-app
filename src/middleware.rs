@@ -1,9 +1,11 @@
 use axum::body::Body;
 use http::Request;
+use opentelemetry_http::HeaderExtractor;
 use tower_http::trace::{
     DefaultOnBodyChunk, DefaultOnEos, DefaultOnFailure, MakeSpan, OnRequest, OnResponse, TraceLayer,
 };
 use tracing::field::Empty;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub fn create_trace_layer() -> TraceLayer<
     tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
@@ -137,6 +139,24 @@ pub fn create_trace_layer() -> TraceLayer<
             // Set the OpenTelemetry span name (method + path for servers)
             let span_name = format!("{} {}", method, path);
             span.record("otel.name", &span_name);
+
+            // Adopt the CALLER's trace, if it sent one. The global
+            // propagator (registered in main.rs) reads the W3C `traceparent`
+            // header; with no header, extract() yields an empty context and
+            // set_parent leaves this span as a new root — so an unadorned
+            // curl behaves exactly as before.
+            //
+            // This must happen AFTER the span exists, because the parent is
+            // attached to the span rather than passed at construction.
+            //
+            // Prove it by hand:
+            //   curl -H 'traceparent: 00-<32 hex>-<16 hex>-01' http://$HOST/
+            // then look for that trace id in X-Ray — the request joins the
+            // caller's trace instead of starting an unrelated one.
+            let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.extract(&HeaderExtractor(headers))
+            });
+            span.set_parent(parent_cx);
 
             span
         })

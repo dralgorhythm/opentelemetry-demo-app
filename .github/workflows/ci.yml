@@ -334,7 +334,11 @@ jobs:
               echo "$svc:${{ github.sha }} already in ECR — skipping (immutable)"
               continue
             fi
+            # BUILD_SHA bakes the commit into the binary (option_env! in
+            # src/main.rs) so the running pod can self-report its build —
+            # that is what the EXPECT_SHA smoke assert below reads.
             docker buildx build --cache-from type=gha --cache-to type=gha,mode=max \
+              --build-arg "BUILD_SHA=${{ github.sha }}" \
               --load -t "$repo:${{ github.sha }}" .
             docker push "$repo:${{ github.sha }}"
           done < <(scripts/roster.sh)
@@ -358,10 +362,12 @@ jobs:
       # The deploy gate is the SMOKE SUITE, not a liveness ping: healthz +
       # greeting through the ALB, and the visitor counter must INCREMENT
       # across two calls — the ElastiCache TLS+AUTH round trip, end to end.
-      # (No EXPECT_SHA/version stamp: the app doesn't self-report a build yet
-      # — deferred with service.version.) Same script a laptop runs.
+      # EXPECT_SHA adds the last missing claim: the build that answers is the
+      # build this run pushed, so "deploy green but the old version is
+      # serving" fails here instead of passing. Same script a laptop runs.
       - name: Smoke the live stack (the deploy gate)
         id: smoke
+        env: { EXPECT_SHA: "${{ github.sha }}" }
         run: scripts/smoke.sh cloud
       # HOST comes from the smoke run itself: smoke.sh derives (svc, ns) from
       # scripts/roster.sh and emits `host=` to GITHUB_OUTPUT, so the summary

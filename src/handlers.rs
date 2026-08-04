@@ -10,8 +10,18 @@ use tracing::Instrument;
 // to Redis availability (a dependency outage that restarts pods or empties
 // every endpoint from rotation makes the blip worse, and GET / already
 // reports it honestly as a 500).
-pub async fn healthz() -> &'static str {
-    "ok"
+//
+// The build stamp rides here rather than on a separate /version route: this
+// is already the one endpoint every probe and the smoke gate hit, and
+// "ok <sha>" keeps the existing `contains "ok"` assert true. Still
+// dependency-free — build_sha() is a compile-time constant.
+//
+// Note this makes the served commit SHA publicly readable through the ALB.
+// Accepted: the repo is public, and knowing which build is live is the
+// entire point of the stamp. A private deployment would move this behind
+// the /version route and an auth check.
+pub async fn healthz() -> String {
+    format!("ok {}", crate::build_sha())
 }
 
 pub async fn hello_world(

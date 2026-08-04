@@ -187,13 +187,14 @@ jobs:
       # visitor counter must INCREMENT across two calls — this environment's
       # own ElastiCache TLS+AUTH round trip, end to end.
       #
-      # No EXPECT_SHA: the app has no build stamp (deferred with
-      # service.version), so this proves the environment is HEALTHY, not that
-      # the promoted SHA is the one serving — `helm --wait --atomic` above is
-      # what backs that claim. Adding the stamp upgrades this line for free.
+      # EXPECT_SHA closes promotion's central question. Everything else here
+      # proves the environment is healthy; this proves the environment is
+      # running THE PROMOTED BUILD — which for a workflow whose entire job is
+      # moving a specific SHA between environments is the claim that matters.
+      # Previously only `helm --wait --atomic` backed it.
       - name: Smoke the promoted environment (the gate)
         run: |
-          scripts/smoke.sh cloud
+          EXPECT_SHA="$SHA" scripts/smoke.sh cloud
           HOST=$(kubectl -n otel-demo get ingress app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           echo "### ${DEPLOY_ENV} serving at http://$HOST — smoked green at \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
           # Rollback reference, same as ci.yml's deploy job: re-run promote
