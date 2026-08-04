@@ -67,6 +67,20 @@ module "eks" {
   # Auto Mode provisions that NodeClass only while a built-in pool is
   # enabled, so dropping it means owning a custom NodeClass, node role, and
   # access entry.
+  #
+  # DO NOT read this list as "this cluster is all on-demand". Most capacity
+  # is SPOT, via the weight-100 custom NodePool in
+  # deploy/cluster/spot-nodepool.yaml (DECISIONS #18) which outranks
+  # general-purpose. That pool is a Kubernetes object, not an entry here:
+  # node_pools takes only Auto Mode's BUILT-IN pool names
+  # (general-purpose, system), so spot capacity is unreachable from
+  # Terraform by construction — DECISIONS #11, one writer per API.
+  #
+  # So general-purpose now earns its place twice: the NodeClass anchor
+  # above, and the on-demand fallback when EC2 has no spot capacity for the
+  # shapes that pool requests. Removing it breaks spot provisioning
+  # outright (the referenced NodeClass disappears) — which is the failure
+  # mode this comment exists to prevent.
   compute_config = {
     enabled    = true
     node_pools = ["general-purpose"]

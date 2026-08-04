@@ -1,0 +1,93 @@
+# Spot-first compute: a custom Auto Mode (Karpenter) NodePool that outranks
+# the built-in on-demand pool. A Kubernetes object, so it lives HERE and is
+# applied by the deploy/promote jobs — Terraform speaks only the AWS API
+# (DECISIONS #6's compute-mode block in terraform/modules/stack/eks.tf points
+# at this file).
+#
+# WHY THIS IS SAFE HERE, and would not be everywhere: spot means EC2 can
+# reclaim a node on 2 minutes' notice, so it is only honest when the workload
+# already survives losing one. This roster does, and none of it was added for
+# spot — replicaCount 2, podDisruptionBudget maxUnavailable 1, and
+# topologySpread across zones all predate it (deploy/services/app.yaml), and
+# the app is stateless with its one piece of state in ElastiCache. Auto Mode
+# handles the reclaim itself (2-min notice -> cordon + drain, PDBs respected).
+# Rebalance RECOMMENDATIONS are not acted on — accepted.
+#
+# HOW THE PRIORITY WORKS: weight 100 beats general-purpose (the built-in
+# pools carry no weight), so every provisioning decision tries spot FIRST.
+# When EC2 has no spot capacity for the requested shapes, Karpenter shelves
+# the failed offerings and general-purpose supplies on-demand as the
+# fallback; consolidation later walks that capacity back down to spot. So
+# general-purpose must STAY enabled in eks.tf — not just for fallback, but
+# because the `default` NodeClass referenced below exists only while at least
+# one built-in pool is enabled. A spot-only cluster would owe a custom
+# NodeClass, node role, and access entry.
+#
+# NO TAINT on purpose: the whole roster tolerates reclaim, so nothing needs
+# to opt OUT of spot. A taint would force tolerations into a chart that
+# deliberately exposes no placement knobs.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: spot
+spec:
+  weight: 100 # 1-100; higher wins when several pools could serve a pod
+  template:
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com # Auto Mode's dialect (upstream Karpenter: karpenter.k8s.aws/EC2NodeClass)
+        kind: NodeClass
+        name: default # provisioned by EKS while a built-in pool is enabled
+      requirements:
+        # Spot ONLY: on-demand fallback is general-purpose's job via the
+        # weight order above, which keeps per-pool capacity-type attribution
+        # readable. Recorded alternative: ["spot", "on-demand"] in ONE pool —
+        # Karpenter then does the preferring itself (reserved > spot >
+        # on-demand), at the cost of that attribution.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        # Diversity is the whole spot risk model: every extra instance type
+        # is another pool EC2 can satisfy a reclaim from, so C/M/R general
+        # families rather than one shape. Generation 5+ keeps the pricing
+        # sane; the CPU cap keeps a roster requesting ~1 vCPU total off
+        # hardware it can never consolidate down from.
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: eks.amazonaws.com/instance-generation
+          operator: Gt
+          values: ["4"]
+        - key: eks.amazonaws.com/instance-cpu
+          operator: In
+          values: ["2", "4", "8"]
+        # amd64 PINNED — the same constraint as the pod nodeSelector, for the
+        # same reason (DECISIONS #13): CI builds a single-arch linux/amd64
+        # image with a plain `docker build`, so a Graviton spot node would
+        # exec-format-error every pod on it. This widens to
+        # ["amd64", "arm64"] only after multi-arch builds exist, and the pod
+        # nodeSelector has to widen with it.
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        # No kubernetes.io/os requirement: Auto Mode is Linux-only and does
+        # not support that label — upstream Karpenter examples that include
+        # it will fail validation here.
+  # Cost ceiling, not capacity planning — the built-in pools ship UNLIMITED,
+  # which is the actual risk on a demo account. 16 vCPU leaves room for node
+  # replacement overlap and spot churn on a 2-pod roster; at the ceiling pods
+  # go Pending instead of quietly buying more EC2. Raise it deliberately if
+  # the HPA item in DEFERRED.md lands.
+  limits:
+    cpu: "16"
+    memory: 32Gi
+  disruption:
+    # Auto Mode's defaults, written down so they are drillable: consolidate
+    # underutilized nodes 30s after pods move. This is what makes both the
+    # scale-down slope and the on-demand -> spot drift observable in minutes
+    # rather than hours — worth knowing before demoing it.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+    # budgets left default (10%, rounded UP — so even a 2-node cluster allows
+    # one disruption and nothing wedges at this scale); expireAfter left
+    # default (336h: every node is replaced inside 21 days regardless).
