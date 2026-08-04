@@ -30,14 +30,40 @@ pass=0 fail=0
 ok()  { echo "  ✓ $1"; pass=$((pass + 1)); }
 bad() { echo "  ✗ $1"; fail=$((fail + 1)); }
 
+# Retry ONLY transient curl failures — timeout, connection refused, reset —
+# and NEVER a real HTTP response. The distinction is the whole point: a 500 is
+# a real answer from a real server and must fail on the first try, while a
+# connection that never completed is a race, not a verdict.
+#
+# Why this exists: during a rollout the ALB briefly routes to a draining
+# target. Exactly one such blip failed an entire deploy gate for a stack that
+# was otherwise healthy (run 30958213453 — the first /healthz timed out at
+# 10s, and the very next curl to the same URL returned 200 with the right
+# body). Every other assert in that run passed, including the X-Ray trace
+# gate. A deploy gate that fails on a 10-second network hiccup teaches people
+# to re-run it, which is how gates stop being believed.
+curl_retry() { # <curl args...>; echoes stdout, non-zero only if ALL attempts fail
+  local attempt out
+  for attempt in 1 2 3; do
+    if out=$(curl -s --max-time 10 "$@"); then printf '%s' "$out"; return 0; fi
+    if [[ $attempt -lt 3 ]]; then
+      echo "  … transient curl failure (attempt $attempt/3), retrying in 5s" >&2
+      sleep 5
+    fi
+  done
+  return 1
+}
+
 expect_status() { # <desc> <want> <url/curl args...>
   local desc=$1 want=$2 got; shift 2
-  got=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@") || got="curl-error"
+  got=$(curl_retry -o /dev/null -w '%{http_code}' "$@") || got="curl-error"
   if [[ "$got" == "$want" ]]; then ok "$desc ($got)"; else bad "$desc: want $want, got $got"; fi
 }
 expect_contains() { # <desc> <needle> <url/curl args...>
   local desc=$1 needle=$2 body; shift 2
-  body=$(curl -s --max-time 10 "$@") || body="(curl error)"
+  # Same retry, same reason — this assert raced the rollout too, it just
+  # happened to win its coin flip in the run that exposed the problem.
+  body=$(curl_retry "$@") || body="(curl error)"
   if [[ "$body" == *"$needle"* ]]; then ok "$desc"; else bad "$desc: no '$needle' in: $body"; fi
 }
 
