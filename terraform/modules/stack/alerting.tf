@@ -382,7 +382,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         width  = 12
         height = 6
         properties = {
-          title  = "App p95 from request logs (5m bins — fills when JSON logs land)"
+          title  = "App p95 from request logs (5m bins)"
           region = data.aws_region.current.region
           view   = "timeSeries"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_p95_bin}"
@@ -395,7 +395,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         width  = 12
         height = 6
         properties = {
-          title  = "Recent 5xx (request logs — fills when JSON logs land)"
+          title  = "Recent 5xx (request logs — empty is healthy)"
           region = data.aws_region.current.region
           view   = "table"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_errors}"
