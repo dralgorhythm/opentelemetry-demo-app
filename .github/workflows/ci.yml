@@ -142,7 +142,9 @@ jobs:
   # AWS_ACCOUNT_ID repo variable so these jobs skip cleanly until bootstrap
   # has run (set it and CD switches itself on).
   infra:
-    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != ''
+    # The dispatch guard keeps manual reconciliation main-only: a workflow_dispatch
+    # from a topic branch must not apply that branch's Terraform to dev.
+    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     needs: gates
     permissions: { id-token: write, contents: read }
@@ -150,7 +152,12 @@ jobs:
     # trust lists that sub. Dev has NO protection rules: continuous deploy
     # stays hands-free.
     environment: dev
-    # One dev-mutating job at a time (group shared with future deploy/destroy).
+    # One dev-mutating job at a time (group shared with deploy/destroy).
+    # KNOWN SEMANTICS: cancel-in-progress:false protects only the RUNNING
+    # job — PENDING (queued) jobs in this group CAN be evicted by newer
+    # runs, so under rapid merges an intermediate deploy may never start.
+    # Convergence is eventual: every merge to main re-asserts the full
+    # desired state, so the newest run always lands the newest tree.
     concurrency: { group: env-dev, cancel-in-progress: false }
     env:
       # Humans need their own access entry: the creator-admin entry goes to the
@@ -180,8 +187,16 @@ jobs:
           before="${{ github.event.before }}"
           case "$before" in ""|0000000000000000000000000000000000000000) before="HEAD^";; esac
           git cat-file -e "$before" 2>/dev/null || before="HEAD^"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             || git diff --name-only "$before" HEAD | grep -q '^terraform/'; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tf=true" >> "$GITHUB_OUTPUT"
+          elif ! files=$(git diff --name-only "$before" HEAD 2>/dev/null); then
+            # FAIL OPEN, not closed: when no diff range resolves (first-ever
+            # push to main, a force-push where HEAD^ is gone too), apply
+            # instead of skipping — a no-op apply costs ~10s; a silently
+            # skipped apply costs drift.
+            echo "tf=true" >> "$GITHUB_OUTPUT"
+            echo "diff range unresolvable — failing open into the apply"
+          elif echo "$files" | grep -q '^terraform/'; then
             echo "tf=true" >> "$GITHUB_OUTPUT"
           else
             echo "tf=false" >> "$GITHUB_OUTPUT"
@@ -190,11 +205,13 @@ jobs:
       # Two credentials in one job: the SHARED stack applies as the scoped
       # ci-shared role (the env role's boundary denies shared state by
       # design), then the env stack re-configures to the env's own role.
-      # CI_SHARED_ROLE_ARN falls back to CI_ROLE_ARN until the bootstrap
-      # apply has set the variable.
+      # No CI_ROLE_ARN fallback on purpose: the env role's boundary denies
+      # shared state, so a fallback only ever produced a cryptic
+      # AccessDenied deep inside terraform init — a missing
+      # CI_SHARED_ROLE_ARN variable should fail loudly right here instead.
       - if: steps.touched.outputs.tf == 'true'
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
-        with: { role-to-assume: "${{ vars.CI_SHARED_ROLE_ARN || vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+        with: { role-to-assume: "${{ vars.CI_SHARED_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
       - if: steps.touched.outputs.tf == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       # The account-shared stack (ECR) applies FIRST: repos must exist before
@@ -266,7 +283,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != ''
+    # Dispatch guard: manual runs deploy only from main (see the infra job).
+    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     # No docker-build dependency: the proof matrix is PR-only ("PRs prove,
     # main ships" — see the roster job); deploy builds its own images.
     needs: [gates, infra]
@@ -287,8 +305,13 @@ jobs:
         with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
       - uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
         id: ecr
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       # One loop, N images. ECR tags are IMMUTABLE: an already-pushed SHA is
       # skipped per-service, so re-runs stay idempotent.
+      # buildx + type=gha: same cache backend as the PR proof matrix. GHA
+      # cache is BRANCH-SCOPED, so main can't read PR-branch cache — main
+      # warms its own cache on the first merge and hits it from the second
+      # merge on (still cuts the cold multi-minute Rust/musl rebuild).
       - name: Build and push service images
         run: |
           while IFS=$'\t' read -r svc _f _ns; do
@@ -297,7 +320,8 @@ jobs:
               echo "$svc:${{ github.sha }} already in ECR — skipping (immutable)"
               continue
             fi
-            docker build -t "$repo:${{ github.sha }}" .
+            docker buildx build --cache-from type=gha --cache-to type=gha,mode=max \
+              --load -t "$repo:${{ github.sha }}" .
             docker push "$repo:${{ github.sha }}"
           done < <(scripts/roster.sh)
       - name: Deploy the roster
@@ -323,16 +347,21 @@ jobs:
       # (No EXPECT_SHA/version stamp: the app doesn't self-report a build yet
       # — deferred with service.version.) Same script a laptop runs.
       - name: Smoke the live stack (the deploy gate)
+        id: smoke
+        run: scripts/smoke.sh cloud
+      # HOST comes from the smoke run itself: smoke.sh derives (svc, ns) from
+      # scripts/roster.sh and emits `host=` to GITHUB_OUTPUT, so the summary
+      # reports exactly the endpoint that was smoked — no second ingress
+      # lookup, no hardcoded namespace/release pair to drift.
+      - name: Publish the serving summary
         run: |
-          scripts/smoke.sh cloud
-          HOST=$(kubectl -n otel-demo get ingress app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-          echo "### Serving at http://$HOST — smoked green at ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Serving at http://${{ steps.smoke.outputs.host }} — smoked green at ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           # Rollback reference: revision history straight in the run summary —
           # `helm rollback <svc> <rev> -n <ns>` is a TEMPORARY stopgap (every
           # merge re-asserts main); the durable fix is always a revert PR.
-          # Non-fatal on purpose: the smoke call above is the gate — a helm/API
-          # hiccup HERE must not fail a step whose real gate already passed
-          # (that would also block the release job for a verified deploy).
+          # Non-fatal on purpose: the smoke gate above already passed — a
+          # helm/API hiccup HERE must not fail the run for a verified deploy
+          # (that would also block the release job).
           { echo ""; echo "Release revisions (rollback ref):"; echo '```'; helm list -A || echo "(helm list failed — smoke gate above is authoritative)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # ── Release: semver, cut automatically on merge to main ────────────────────
@@ -344,13 +373,15 @@ jobs:
   # and smoke-verified"; every roster service's image gets the semver as an
   # ECR tag alias next to its SHA (IMMUTABLE adds tags, never repoints).
   release:
-    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != ''
+    # Dispatch guard: a manual run may never cut a release off a non-main SHA.
+    if: github.event_name != 'pull_request' && vars.AWS_ACCOUNT_ID != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: [deploy]
     runs-on: ubuntu-latest
     # pull-requests:read backs the gh pr view title lookups
     permissions: { contents: write, id-token: write, pull-requests: read }
     concurrency: { group: release, cancel-in-progress: false }
-    env: { AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+    # ECR_REPO: the one project-slug constant, same spelling as the deploy job.
+    env: { AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}", ECR_REPO: otel-demo-app }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 } # full history + tags for git describe
@@ -358,6 +389,15 @@ jobs:
         id: rel
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
+          # RE-RUN REPAIR: if HEAD already carries a release tag, a previous
+          # run's `gh release create` succeeded and this re-run exists to
+          # finish what came after it — emit that tag and skip creation, so
+          # the run proceeds straight to the ECR aliasing step below.
+          if t=$(git describe --tags --exact-match --match 'v*' HEAD 2>/dev/null); then
+            echo "HEAD already released as $t — re-run proceeds to aliasing"
+            echo "tag=$t" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
           if [ -z "$last" ]; then
             new="v0.1.0" # baseline: first release anchors the series
@@ -408,15 +448,24 @@ jobs:
           # DIFFERENT failure than "tag already present" and says so.
           missed=0
           while IFS=$'\t' read -r svc _f _ns; do
-            m=$(aws ecr batch-get-image --repository-name "otel-demo-app/$svc" --image-ids imageTag="${{ github.sha }}" \
+            m=$(aws ecr batch-get-image --repository-name "${ECR_REPO}/$svc" --image-ids imageTag="${{ github.sha }}" \
                   --query 'images[0].imageManifest' --output text) || m=""
             if [ -z "$m" ] || [ "$m" = "None" ]; then
-              echo "::error::otel-demo-app/$svc: no image manifest for ${{ github.sha }} — alias skipped"
+              echo "::error::${ECR_REPO}/$svc: no image manifest for ${{ github.sha }} — alias skipped"
               missed=$((missed + 1)); continue
             fi
-            aws ecr put-image --repository-name "otel-demo-app/$svc" \
-              --image-tag "${{ steps.rel.outputs.tag }}" --image-manifest "$m" >/dev/null \
-              || echo "otel-demo-app/$svc: tag already present (immutable repo, re-run) — ok"
-            echo "image otel-demo-app/$svc:${{ github.sha }} also tagged ${{ steps.rel.outputs.tag }}"
+            # Tolerate ONLY the immutable-tag collision (a re-run re-aliasing
+            # an already-tagged image); any OTHER put-image failure — throttle,
+            # auth, outage — counts as missed and fails the accounting below.
+            if ! out=$(aws ecr put-image --repository-name "${ECR_REPO}/$svc" \
+                  --image-tag "${{ steps.rel.outputs.tag }}" --image-manifest "$m" 2>&1); then
+              if grep -q ImageAlreadyExistsException <<<"$out"; then
+                echo "${ECR_REPO}/$svc: tag already present (immutable repo, re-run) — ok"
+              else
+                echo "::error::${ECR_REPO}/$svc: put-image failed: $out"
+                missed=$((missed + 1)); continue
+              fi
+            fi
+            echo "image ${ECR_REPO}/$svc:${{ github.sha }} also tagged ${{ steps.rel.outputs.tag }}"
           done < <(scripts/roster.sh)
           [ "$missed" -eq 0 ] || { echo "::error::$missed roster service(s) not aliased — release ${{ steps.rel.outputs.tag }} is inconsistently tagged in ECR"; exit 1; }

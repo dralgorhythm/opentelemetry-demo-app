@@ -36,8 +36,12 @@ expect_contains() { # <desc> <needle> <url/curl args...>
   if [[ "$body" == *"$needle"* ]]; then ok "$desc"; else bad "$desc: no '$needle' in: $body"; fi
 }
 
-visitor_count() { # trailing integer of the greeting ("…visitor number N"), or ""
-  curl -s --max-time 10 "http://$HOST/" | grep -oE '[0-9]+' | tail -1 || true
+visitor_count() { # counter of the greeting ("…visitor number N"), or ""
+  # Anchored to the greeting phrase on purpose: a bare last-integer grab
+  # would let digits in an error page (ALB "503 Service Temporarily
+  # Unavailable" HTML) masquerade as a counter — empty output now means
+  # "no greeting at all", distinct from a real non-increment.
+  curl -s --max-time 10 "http://$HOST/" | grep -oE 'visitor number [0-9]+' | grep -oE '[0-9]+' | tail -1 || true
 }
 
 case "$mode" in
@@ -56,17 +60,23 @@ case "$mode" in
     # point before trusting any of them.
     echo "smoke[cloud]: target $CLUSTER/$AWS_REGION — aws-cli $(aws configure list 2>/dev/null | awk '/region/ {$1=$1; print; exit}')"
     aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION" >/dev/null
+    # Ingress name = release name (roster convention): derive (svc, ns) from
+    # the roster's first entry instead of hardcoding the pair — the roster
+    # has ONE parser (scripts/roster.sh) and this is just another consumer.
+    IFS=$'\t' read -r svc _f ns < <(scripts/roster.sh | head -n 1)
     # Bounded wait: on a fresh bring-up the ALB takes 2-4 min to provision;
     # on an up stack the first probe succeeds and this costs nothing.
-    # Ingress name = release name (roster convention): `app` in otel-demo.
     HOST=""
     for _ in $(seq 1 30); do
-      HOST=$(kubectl -n otel-demo get ingress app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+      HOST=$(kubectl -n "$ns" get ingress "$svc" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
       [[ -n "$HOST" ]] && curl -sf --max-time 5 "http://$HOST/healthz" >/dev/null 2>&1 && break
       HOST=""; sleep 10
     done
     [[ -n "$HOST" ]] || { echo "ALB never became reachable — is the stack up?"; exit 1; }
-    echo "app through the ALB ($HOST):"
+    # In CI, hand the host to the deploy summary step machine-readably —
+    # the workflow must not re-derive the ingress lookup this script owns.
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo "host=$HOST" >> "$GITHUB_OUTPUT"; fi
+    echo "$svc through the ALB ($HOST):"
     # healthz has NO dependencies by design (readiness on / would evict all
     # pods on a Redis blip) — so a healthy healthz plus a healthy greeting
     # below are two different claims, and both get asserted.
