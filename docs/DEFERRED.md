@@ -101,10 +101,12 @@ forks already chosen.
 
 ## Scale & cost
 
-- **Spot capacity.** A custom Auto Mode NodePool (weight over
-  `general-purpose`) cuts node cost ~70%; the 2-replica + PDB + spread floor
-  already absorbs reclaims. First step: `deploy/cluster/spot-nodepool.yaml`
-  with amd64-pinned C/M/R instance requirements.
+- ~~**Spot capacity.**~~ Landed: `deploy/cluster/spot-nodepool.yaml`, a
+  weight-100 Auto Mode NodePool that outranks `general-purpose`
+  (DECISIONS #18). Remaining knob: the amd64 pin is inherited from the
+  single-arch image (DECISIONS #13) — multi-arch builds would widen both
+  the pool requirement and the pod nodeSelector to Graviton, worth roughly
+  another 20%.
 - **HPA + load testing.** The chart has an `hpa.yaml` template; resource
   requests are folklore until measured. First step: a k6/vegeta run against
   the ALB to find the loaded steady-state, then set requests and enable the
