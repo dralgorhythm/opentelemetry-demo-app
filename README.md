@@ -103,15 +103,44 @@ classic VPC-hang). Bootstrap identity and shared ECR deliberately survive.
 
 ## Local development
 
+The compose file provides exactly the app's two dependencies — Redis, and
+Jaeger standing in for the cloud's ADOT→X-Ray pipeline (same OTLP gRPC
+export path, same default endpoint `127.0.0.1:4317`):
+
 ```bash
-docker compose up -d          # Redis + Jaeger (UI on :16686)
-cargo run -- -f config.yml    # serves http://127.0.0.1:8080
+docker compose up -d          # Redis (127.0.0.1:6379) + Jaeger (UI on :16686)
+cargo run                     # reads ./config.yml; serves http://127.0.0.1:8080
+
+curl localhost:8080/          # greeting + visit counter (INCRBY in Redis)
+curl localhost:8080/healthz   # liveness/readiness: no Redis touch, never traced
 ```
 
-Or build the release binary with `cargo build --release` and run
-`target/release/opentelemetry-demo-app -f config.yml`. The container image is
-`docker build --platform linux/amd64 .` (musl static on chainguard/static).
-`OTEL_EXPORTER_OTLP_ENDPOINT` configures the OTLP gRPC trace destination.
+Then open <http://localhost:16686> and find the `GET /` root span with its
+`INCRBY visit_counter` child — the same spans production ships to X-Ray.
+
+- **Config**: one YAML file, chosen with `-f` (default `./config.yml`) — the
+  identical mechanism the cluster uses, where the whole file is replaced by a
+  CSI-mounted Secrets Manager secret. There are no per-value env overrides;
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, and `RUST_LOG` are the
+  only env knobs.
+- **Gates, locally** (same checks CI runs): `cargo fmt --all --check &&
+  cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`
+- **The production container** (musl static on chainguard/static; single-arch
+  amd64, so Apple Silicon needs `--platform`): the image bakes no config —
+  mount one that binds `0.0.0.0` (loopback inside a container is unreachable)
+  and pass `-f`:
+
+  ```bash
+  docker build --platform linux/amd64 -t app:local .
+  printf 'redis_url: "redis://host.docker.internal:6379"\nlisten_address: "0.0.0.0:8080"\n' > target/local.yml
+  docker run --rm -p 8080:8080 --platform linux/amd64 \
+    -v "$PWD/target/local.yml:/etc/app/config.yml:ro" app:local -f /etc/app/config.yml
+  ```
+
+Gotchas: Docker Desktop only shares your home dir and `/tmp` by default — a
+config mounted from an unshared path silently vanishes and the app exits 1
+(the missing-file error prints to stderr). The visit counter lives in Redis,
+so it persists across app restarts; `docker compose down -v` resets it.
 
 ## Repo map
 
