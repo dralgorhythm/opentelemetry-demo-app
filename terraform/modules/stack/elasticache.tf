@@ -31,7 +31,6 @@ resource "aws_vpc_security_group_ingress_rule" "redis_from_cluster" {
   to_port                      = 6379
   referenced_security_group_id = module.eks.cluster_primary_security_group_id
 }
-
 # AUTH token: alphanumeric-only by TWO constraints that happen to agree —
 # ElastiCache forbids '@', '"', '/' in tokens, and the token is embedded
 # unescaped in the rediss:// URL below (the app does no percent-encoding).

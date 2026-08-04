@@ -23,8 +23,11 @@ pub async fn hello_world(
             tracing::debug!("Successfully obtained Redis connection from pool");
             conn
         }
-        Err(_) => {
-            tracing::error!("Failed to get database connection from pool");
+        Err(e) => {
+            // Log the CAUSE — a bare "failed" line made the first in-cluster
+            // Redis outage undiagnosable from pod logs (SG? TLS? AUTH? all
+            // look identical from outside).
+            tracing::error!(error = %e, "Failed to get database connection from pool");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to get database connection",
@@ -46,8 +49,8 @@ pub async fn hello_world(
     // Increment the visit counter in Redis
     let visit_count: i32 = match conn.incr("visit_counter", 1).instrument(span).await {
         Ok(count) => count,
-        Err(_) => {
-            tracing::error!("Failed to increment visit counter in Redis");
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to increment visit counter in Redis");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to increment visit counter",
