@@ -42,7 +42,9 @@ flowchart LR
 
 Every pod's AWS access is EKS Pod Identity (no IRSA, no static keys); the
 app's only permission is reading its own config secret, the collector's is
-write-only X-Ray. Logs ship via the CloudWatch observability add-on;
+write-only X-Ray. Workloads land on a spot-first NodePool
+(`deploy/cluster/spot-nodepool.yaml`) with the on-demand `general-purpose`
+pool as fallback. Logs ship via the CloudWatch observability add-on;
 ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
 
 ## How it was built — the PR series
@@ -59,7 +61,14 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
 | #8 | CD: deploy + release jobs, `scripts/smoke.sh` deploy gate, `destroy.yml` |
 | #9 | These docs |
 | #10–#12 | Production hardening from the first live incident: smoke-gate exec bit; real Redis error surfacing (bb8's default `NopErrorSink` had been masking every connection failure); the security-group hypothesis disproved by live test and reverted; rustls `tls12` feature restored — redis-rs had compiled TLS 1.2 out while ElastiCache negotiates only TLS 1.2 |
-| #13–#15 | Docs truth-sync; the [demo cheat sheet](docs/demo-cheatsheet.md); `promote.yml` — build-once/promote-many to any number of gated environments |
+| #13–#14 | Docs truth-sync; the [demo cheat sheet](docs/demo-cheatsheet.md) |
+| #15 | Observability hardening: the X-Ray marker-trace smoke assert, collector `health_check` + `memory_limiter`, ELB-5xx + Redis alarm coverage |
+| #16 | `promote.yml` — build-once/promote-many to any number of gated environments |
+| #17 | CD correctness, smoke robustness, and permission-boundary/budget fixes |
+| #18 | Local-dev docs: the compose + Jaeger story under [Local development](#local-development) |
+| #19 | The second live incident: dashboard log queries returned zero rows against text logs — JSON log encoding via tracing-subscriber, plus the `latency_ms` u128→u64 cast so percentiles aggregate |
+| #20 | Spot-first node capacity: a weight-100 NodePool (`deploy/cluster/spot-nodepool.yaml`) with on-demand fallback |
+| #21 | Inbound trace-context propagation (W3C `traceparent`) + the `BUILD_SHA` build stamp on `/healthz` and every span |
 
 ## Bring-up from zero
 
@@ -69,9 +78,13 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
 2. Merge to `main` (or `workflow_dispatch` the `ci` workflow). CI applies
    shared ECR then the dev stack (first apply ~15–20 min), builds and pushes
    the image, `helm upgrade --install`s the roster, and gates on
-   `scripts/smoke.sh cloud` — healthz + greeting through the ALB, plus
-   **visitor-counter monotonicity**, which proves the ElastiCache TLS+AUTH
-   round trip end to end. The run summary prints the serving URL.
+   `scripts/smoke.sh cloud` — five checks: healthz and the greeting through
+   the ALB, **visitor-counter monotonicity** (the ElastiCache TLS+AUTH round
+   trip end to end), **this run's own marker trace indexed in X-Ray** within
+   ~90s (proves app→ADOT→X-Ray delivery, not just span emission), and the
+   **served-build assert** when `EXPECT_SHA` is set (the `/healthz` build
+   stamp must match the just-built SHA). The run summary prints the serving
+   URL.
    Releases are driven by PR titles via the merge commit (merge-commit or
    squash); rebase-merge would bypass bump detection — disable it in repo
    settings.
@@ -86,7 +99,9 @@ summary *before* the approval prompt, so the reviewer approves a specific
 artifact; the approved jobs then apply that env's Terraform (cold bring-up
 and warm no-op are the same button) and deploy the image dev already smoked.
 
-The environment is a plain string validated against `terraform/envs/<env>/`,
+The environment is a plain string validated against `terraform/envs/<env>/`
+and `deploy/envs/<env>.yaml` — and `dev` is rejected outright (dev deploys
+continuously from `main`, never by promotion) —
 so a fourth environment is a bootstrap tfvars entry, a GitHub Environment,
 an env root and a values file — **no workflow edit**. Full runbook:
 [docs/bootstrap.md § Adding an environment](docs/bootstrap.md#6--adding-an-environment).
@@ -153,7 +168,7 @@ so it persists across app restarts; `docker compose down -v` resets it.
 | `charts/app/` | the one generic chart every service releases from |
 | `deploy/services/` | the roster — one values file per service |
 | `deploy/envs/` | environment-qualified values (last `-f` wins) |
-| `deploy/cluster/` | cluster-scoped YAML (ADOT collector) |
+| `deploy/cluster/` | cluster-scoped YAML (ADOT collector, spot NodePool) |
 | `scripts/` | `roster.sh` (the roster's one parser), `smoke.sh` (the deploy gate) |
-| `.github/workflows/` | `ci.yml` (gates → infra → deploy → release), `destroy.yml` |
+| `.github/workflows/` | `ci.yml` (gates → infra → deploy → release), `promote.yml` (gated promotion), `destroy.yml` |
 | `docs/` | [bootstrap](docs/bootstrap.md) · [decisions](docs/DECISIONS.md) · [deferred work](docs/DEFERRED.md) · [demo cheat sheet](docs/demo-cheatsheet.md) |
