@@ -1,0 +1,96 @@
+name: destroy
+
+# Teardown as a button. Encodes the destroy-order gotcha: the ALB was created
+# by the cluster (EKS Auto Mode) from the Ingress and is NOT in Terraform
+# state — uninstall the Helm releases and wait for the ALB to be reaped
+# BEFORE `terraform destroy`, or the VPC hangs on dependency errors.
+#
+# Dispatch from main (the OIDC trust covers main-ref and environment subs).
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm tearing down the chosen environment'
+        required: true
+      environment:
+        description: "Environment to tear down"
+        type: choice
+        options: [dev] # staging/prod roots are inert scaffolding — no roles, no state
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    if: vars.AWS_ACCOUNT_ID != '' && inputs.confirm == 'destroy'
+    # Two keys per destroy: the typed confirmation above, plus the TARGET
+    # environment's own protection rules (dev has none — hands-free drills).
+    # Destroys ONE env's workload stack only — the CI identity lives in
+    # terraform/bootstrap with its own state, so teardown can never
+    # decapitate the credential it runs on, and the shared stack (ECR)
+    # deliberately survives so images and state outlive drills.
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    # Same per-env group as that env's infra/deploy jobs: never destroy
+    # mid-apply or mid-helm-upgrade.
+    concurrency: { group: "env-${{ inputs.environment }}", cancel-in-progress: false }
+    env: { AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}", CLUSTER: "otel-demo-app-${{ inputs.environment }}" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - name: Delete the app releases first (the ALB is not in Terraform state)
+        run: |
+          # Distinguish "cluster already gone" (fine — nothing to drain) from
+          # any other failure (abort loudly): a transient STS/API error must
+          # not silently skip the drain and hand terraform a VPC with a live
+          # ALB still wired into it — the exact hang this job exists to prevent.
+          if ! aws eks describe-cluster --name "$CLUSTER" --region "$AWS_REGION" >/dev/null 2>err.txt; then
+            if grep -q ResourceNotFoundException err.txt; then
+              echo "cluster $CLUSTER not found — nothing to drain"; exit 0
+            fi
+            echo "::error::describe-cluster failed for a reason other than not-found — refusing to guess:"
+            cat err.txt; exit 1
+          fi
+          vpc=$(aws eks describe-cluster --name "$CLUSTER" --region "$AWS_REGION" \
+                  --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          # Roster-driven, like deploy: the release list IS the directory.
+          # || true keeps re-runs idempotent (already-uninstalled is fine);
+          # a REAL uninstall failure still surfaces in the ALB wait below.
+          while IFS=$'\t' read -r svc _f ns; do
+            helm uninstall "$svc" -n "$ns" --wait || true
+          done < <(scripts/roster.sh)
+          # Cluster-scoped manifests too (the ADOT collector deployment).
+          kubectl delete -f deploy/cluster/ --ignore-not-found=true || true
+          # Wait for Auto Mode to reap the load balancers — scoped to THIS
+          # cluster's VPC (an account-wide count breaks the moment the account
+          # hosts anything else), and a timeout ABORTS instead of falling
+          # through to a destroy that would hang on the still-attached ALB.
+          for _ in $(seq 1 30); do
+            n=$(aws elbv2 describe-load-balancers \
+                  --query "length(LoadBalancers[?VpcId=='$vpc'])" --output text)
+            [ "$n" = "0" ] && exit 0
+            echo "waiting: $n load balancer(s) still in $vpc"; sleep 10
+          done
+          echo "::error::load balancers still present in $vpc after 5m — aborting before terraform destroy hangs on the VPC"
+          exit 1
+      - run: terraform -chdir=terraform/envs/${{ inputs.environment }} init
+      - run: terraform -chdir=terraform/envs/${{ inputs.environment }} destroy -auto-approve
+      - name: Orphan spot-check (account-wide by design — the VPC is gone now)
+        run: |
+          echo "ALBs left: $(aws elbv2 describe-load-balancers --query 'length(LoadBalancers)' --output text)"
+          echo "NATs left: $(aws ec2 describe-nat-gateways --filter Name=state,Values=available --query 'length(NatGateways)' --output text)"
+          # Log groups: still-draining agents or buffered control-plane
+          # delivery can re-create a group AFTER terraform deleted it
+          # (auto_create_group). Sweep idempotently; a straggler landing
+          # after this sweep clears on the next destroy or a manual
+          # delete-log-group.
+          for g in application dataplane host performance; do
+            aws logs delete-log-group --log-group-name "/aws/containerinsights/$CLUSTER/$g" 2>/dev/null || true
+          done
+          aws logs delete-log-group --log-group-name "/aws/eks/$CLUSTER/cluster" 2>/dev/null || true
+          echo "log groups left: $(aws logs describe-log-groups --log-group-name-prefix "/aws/containerinsights/$CLUSTER" --query 'length(logGroups)' --output text)"

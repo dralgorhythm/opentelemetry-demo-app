@@ -119,3 +119,6 @@ Nothing else runs locally. Later PRs bring the pipeline alive:
 
 Re-applying this stack is always local, with your own credentials — never
 from CI.
+
+Why things are the way they are: [DECISIONS.md](./DECISIONS.md) · what's
+deliberately not built yet: [DEFERRED.md](./DEFERRED.md).
