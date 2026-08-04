@@ -1,1 +1,9 @@
 /target
+
+# Terraform working dirs and state — state lives in S3, providers are
+# re-fetched by `terraform init` (only .terraform.lock.hcl is tracked).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
