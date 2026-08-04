@@ -1,0 +1,106 @@
+# Generic service chart: defaults are the MINIMAL shape (ClusterIP, one
+# replica, no AWS identity, no gates). Each service opts INTO capabilities in
+# its deploy/services/<name>.yaml — today's roster is one service (app), but
+# the chart stays service-agnostic. CI always sets image.repository and
+# image.tag per release.
+
+image:
+  repository: "" # <registry>/otel-demo-app/<service> — CI sets
+  tag: ""        # git SHA — CI sets
+
+# Container args, appended to the image ENTRYPOINT. The app takes its config
+# file path here (e.g. ["-f", "/mnt/secrets-store/config.yml"]) — the path is
+# a deploy-side decision, not baked into the image.
+args: []
+
+port: 8080          # containerPort; the Service listens on 80 → this
+probePath: /healthz # liveness+readiness target
+
+replicaCount: 1 # used ONLY when autoscaling.enabled=false (the HPA owns the count otherwise)
+
+# Starting-point sizing for a small static binary, to be re-measured under
+# load: CPU request = loaded steady-state; NO cpu limit — throttling at a
+# limit taxes p99 AND suppresses the HPA's own signal (QoS drops
+# Guaranteed→Burstable: a measured trade, not a default). Memory request
+# headroom over observed peak; the limit stays as the OOM guard. Auto Mode
+# sizes nodes off these requests.
+resources:
+  requests: { cpu: 100m, memory: 32Mi }
+  limits: { memory: 64Mi }
+
+# Elastic scaling: CPU % is measured against resources.requests.cpu — the
+# same number Karpenter sizes nodes from, so HPA scale-out cascades into node
+# provisioning. Needs the metrics-server add-on (terraform/modules/stack/eks.tf — Auto Mode
+# does NOT bundle it).
+autoscaling:
+  enabled: false
+  minReplicas: 2 # never below the PDB's assumptions
+  maxReplicas: 5
+  targetCPUUtilizationPercent: 70
+
+# Placement diversity: node spread is HARD (forces a second instance), zone
+# spread is SOFT. Pair with the PDB on anything customer-facing.
+topologySpread:
+  enabled: false
+
+# Node pinning. Empty = the scheduler's choice (Auto Mode). The concrete use
+# here: single-arch images pin their architecture (the Auto Mode
+# general-purpose pool is mixed-arch, so an amd64-only image needs
+# `kubernetes.io/arch: amd64` or half the fleet ImagePullBackOffs).
+nodeSelector: {}
+tolerations: []
+
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
+# ingress.enabled=true -> an ALB via the chart-declared IngressClass (Auto
+# Mode ships no default class). scheme flows into IngressClassParams (Auto
+# Mode's config surface), not annotations.
+ingress:
+  enabled: false
+  className: alb
+  scheme: internet-facing
+  # TLS: list ACM certificate ARN(s) and the ALB grows an HTTPS listener —
+  # under Auto Mode certs live in IngressClassParams, NOT the
+  # kubernetes.io/tls Secret or annotations a self-managed controller would
+  # use. Empty = HTTP only (the named gap: waits on a domain decision).
+  certificateARNs: []
+  # ALB idle timeout (seconds). The AWS default of 60s silently resets idle
+  # WebSocket/long-poll/SSE connections — the classic "worked until someone
+  # added streaming" trap. Unset (null) keeps the ALB default.
+  idleTimeoutSeconds: null
+
+# The Pod Identity anchor: Terraform associates (namespace, <release name>)
+# with an IAM role. Only for services that call AWS APIs.
+serviceAccount:
+  create: false
+
+# Default-deny ingress to this service's pods, optionally allowing exactly
+# one caller (by its app label) on `port`. Requires the network policy
+# controller (NOT on by default under Auto Mode) — a deferred hardening
+# here; the gate exists so enabling it is a values change, not a chart PR.
+networkPolicy:
+  enabled: false
+  allowFromApp: ""
+
+# Plain name->value container env. The chart is service-agnostic: whatever a
+# service needs (OTEL_EXPORTER_OTLP_ENDPOINT, RUST_LOG, ...) lives in its
+# deploy/services file, not in chart logic.
+env: {}
+
+# One Secrets Manager secret via the Secrets Store CSI driver + ASCP add-on,
+# Pod Identity auth (requires serviceAccount.create + a terraform-side
+# association and role). Mounts as a FILE at /mnt/secrets-store/<fileName>
+# (updates in-place on rotation); sync additionally materializes a k8s
+# Secret feeding <sync.envVar> (captured at process start — stale across
+# rotation; the env-vs-file trade).
+# NOTE: a mount referencing a secret with NO VALUE fails pod start — that's
+# fail-fast, not a bug. Set the value before enabling.
+secrets:
+  enabled: false
+  name: ""     # Secrets Manager name (deterministic; ARNs have random suffixes)
+  fileName: secret
+  sync:
+    enabled: false
+    envVar: ""

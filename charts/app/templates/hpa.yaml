@@ -1,0 +1,27 @@
+{{- if .Values.autoscaling.enabled }}
+# Elastic scaling, half one: the HPA raises/lowers replicas to hold CPU at the
+# target % OF THE POD'S REQUESTS (resources.requests.cpu — the same field
+# Karpenter sizes nodes from). Half two is Auto Mode itself: pods that don't
+# fit go Pending, Karpenter provisions a node, scale-down consolidates it
+# away. Two control loops, coupled only through the scheduler.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }} # never below the PDB's assumptions
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercent }}
+{{- end }}

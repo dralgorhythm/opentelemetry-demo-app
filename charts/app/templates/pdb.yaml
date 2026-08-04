@@ -1,0 +1,17 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Caps VOLUNTARY disruption (node drains, Auto Mode consolidation/upgrades):
+# with 2 replicas and maxUnavailable 1, evictions must go one pod at a time,
+# so a node roll always leaves one pod serving. A PDB does nothing for
+# involuntary loss (node crash) — that's what replicas themselves are for.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+# Auto Mode gotcha: unlike a self-installed AWS Load Balancer Controller, Auto
+# Mode ships NO default "alb" IngressClass. Without these two objects the
+# Ingress references a class that doesn't exist and no ALB is ever created —
+# silently. Both are cluster-scoped (fine for a single-release demo cluster).
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: {{ .Values.ingress.className }}
+spec:
+  # Under Auto Mode the scheme lives HERE, not in Ingress annotations
+  # (that's the self-managed-controller convention).
+  scheme: {{ .Values.ingress.scheme }}
+  {{- with .Values.ingress.certificateARNs }}
+  # ACM certs attach the HTTPS:443 listener (Auto Mode dialect: params, not
+  # annotations/Secrets).
+  certificateARNs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if .Values.ingress.idleTimeoutSeconds }}
+  loadBalancerAttributes:
+    - key: idle_timeout.timeout_seconds
+      value: {{ .Values.ingress.idleTimeoutSeconds | quote }}
+  {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.ingress.className }}
+spec:
+  controller: eks.amazonaws.com/alb # Auto Mode's built-in controller
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: {{ .Values.ingress.className }}
+{{- end }}

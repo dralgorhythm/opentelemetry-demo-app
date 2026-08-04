@@ -1,0 +1,57 @@
+# The app service (the Rust OTel demo): the roster's one entry, and the
+# platform's full shape — public ALB, AWS identity (Pod Identity -> Secrets
+# Manager), disruption protection. Filename = service = release name =
+# ServiceAccount name (the roster convention, scripts/roster.sh).
+# image.repository/tag ride in via --set from CI: they embed the account id,
+# which stays out of the repo.
+
+namespace: otel-demo # roster/loop metadata (scripts/roster.sh), not a chart value
+
+replicaCount: 2
+
+topologySpread:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+serviceAccount:
+  create: true # Pod Identity association (terraform/modules/stack/elasticache.tf) names this release
+
+# Single-arch pin: the image is built linux/amd64 only, and the Auto Mode
+# general-purpose pool is mixed-arch — without this pin a pod can land on
+# arm64 and ImagePullBackOff.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+# HTTP-only internet-facing ALB (certs wait on a domain decision — see the
+# chart's certificateARNs comment). idleTimeoutSeconds stays default (60s):
+# axum/hyper has no server-side idle timeout, so the backend never closes a
+# keep-alive before the ALB does — no idle-timeout 502 race to tune away.
+ingress:
+  enabled: true
+  className: alb
+  scheme: internet-facing
+
+# The WHOLE config.yml arrives as one Secrets Manager secret, mounted as a
+# file by the CSI driver (secrets.name is environment-qualified — it lives
+# in deploy/envs/<env>.yaml). sync stays off: the app reads the file via
+# args below; no k8s Secret, no env-var copy. The app reads config ONCE at
+# boot, so secret rotation lands on pod restart, not in-place.
+secrets:
+  enabled: true
+  fileName: config.yml
+  sync:
+    enabled: false
+
+# The chart mounts the CSI volume at /mnt/secrets-store/<fileName>.
+args: ["-f", "/mnt/secrets-store/config.yml"]
+
+# Process env, read by the SDKs directly — config.yml carries only what the
+# app's own config loader owns (redis_url, listen_address).
+env:
+  # OTLP gRPC to the ADOT collector (deploy/cluster/otel-collector.yaml),
+  # which lives in the default namespace.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.default.svc.cluster.local:4317
+  RUST_LOG: info
