@@ -32,6 +32,22 @@ resource "aws_vpc_security_group_ingress_rule" "redis_from_cluster" {
   referenced_security_group_id = module.eks.cluster_primary_security_group_id
 }
 
+# Observed live: the SG-referenced rule above did NOT admit app pods — GET /
+# hung the full bb8 connect timeout (dropped SYN symptom). Auto Mode manages
+# node ENIs itself and their SG attachment doesn't reliably match the cluster
+# primary SG (secondary ENIs are a known gap). This CIDR rule is the working
+# path: still private-only (the VPC), with TLS + AUTH on top. Tightening back
+# to an exact SG reference once the Auto-Mode-attached SG is pinned down is
+# recorded in docs/DEFERRED.md.
+resource "aws_vpc_security_group_ingress_rule" "redis_from_vpc" {
+  security_group_id = aws_security_group.redis.id
+  description       = "Redis (TLS) from anywhere in the VPC (Auto Mode ENI SG workaround)"
+  ip_protocol       = "tcp"
+  from_port         = 6379
+  to_port           = 6379
+  cidr_ipv4         = var.vpc_cidr
+}
+
 # AUTH token: alphanumeric-only by TWO constraints that happen to agree —
 # ElastiCache forbids '@', '"', '/' in tokens, and the token is embedded
 # unescaped in the rediss:// URL below (the app does no percent-encoding).
