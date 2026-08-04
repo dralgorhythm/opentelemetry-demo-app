@@ -18,12 +18,36 @@ probePath: /healthz # liveness+readiness target
 
 replicaCount: 1 # used ONLY when autoscaling.enabled=false (the HPA owns the count otherwise)
 
-# Starting-point sizing for a small static binary, to be re-measured under
-# load: CPU request = loaded steady-state; NO cpu limit — throttling at a
-# limit taxes p99 AND suppresses the HPA's own signal (QoS drops
-# Guaranteed→Burstable: a measured trade, not a default). Memory request
-# headroom over observed peak; the limit stays as the OOM guard. Auto Mode
-# sizes nodes off these requests.
+# MEASURED, not guessed (dev, 2026-08-04, ~199k requests over 11 min through
+# the ALB; per-pod figures from Container Insights pod_cpu_usage_total and
+# pod_memory_working_set):
+#
+#            idle        peak (~536 rps/pod, 1073 rps total across 2 pods)
+#   cpu      0.3m        198m
+#   memory   2.0 MiB     6.6 MiB
+#
+# Zero 5xx across the run and zero restarts, so neither the memory limit nor
+# any CPU ceiling was reached. Latency IMPROVED as concurrency rose (p95
+# 210ms at c=5 -> 121ms at c=100) while throughput scaled near-linearly to
+# 1073 rps: the app never found its knee, so these are floor measurements,
+# not saturation ones.
+#
+# cpu 100m — UNCHANGED, and now for a stated reason: it sits between idle and
+# the 198m peak, covering roughly 270 rps/pod. Raising it toward 198m would
+# reserve capacity for a synthetic spike this service will never see and
+# would make Auto Mode buy bigger nodes; lowering it would make the HPA
+# (below) hair-trigger. It also sets a sane scale-out point: 70% of 100m is
+# ~190 rps/pod.
+#
+# memory 32Mi request / 64Mi limit — request trimmed from nothing (it was
+# already 32Mi) but the limit is now a DELIBERATE 10x over observed peak
+# rather than a guess. Kept generous on purpose: OOMKill is fatal and
+# unrecoverable, whereas over-requesting 25 MiB on a 4 GiB node costs
+# nothing. The OTel batch exporter is the one component that can spike here.
+#
+# NO cpu limit — throttling at a limit taxes p99 AND suppresses the HPA's own
+# signal (QoS drops Guaranteed→Burstable: a measured trade, not a default).
+# Auto Mode sizes nodes off these requests.
 resources:
   requests: { cpu: 100m, memory: 32Mi }
   limits: { memory: 64Mi }
@@ -32,6 +56,13 @@ resources:
 # same number Karpenter sizes nodes from, so HPA scale-out cascades into node
 # provisioning. Needs the metrics-server add-on (terraform/modules/stack/eks.tf — Auto Mode
 # does NOT bundle it).
+#
+# Now unblocked by the measurements above, and left OFF deliberately: at 70%
+# of a 100m request, scale-out fires around ~190 rps/pod, and the load run
+# showed 2 replicas absorbing 1073 rps without reaching saturation — so this
+# service has no demonstrated need to scale. Turning it on is a values
+# change; the reason to do it is a real traffic pattern, not the fact that
+# the knob exists.
 autoscaling:
   enabled: false
   minReplicas: 2 # never below the PDB's assumptions
