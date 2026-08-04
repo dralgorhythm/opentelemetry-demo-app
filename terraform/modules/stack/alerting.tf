@@ -53,11 +53,9 @@ locals {
   # the pod-name prefix, not kubernetes.labels.app.
   # Field mapping is the app's tower-http on_response event ("HTTP request
   # completed" with status_code + latency_ms, src/middleware.rs), nested
-  # under fields.* by tracing-subscriber's JSON formatter. HONEST CAVEAT:
-  # the app ships human-readable text logs today, so log_processed.* stays
-  # empty and these queries return nothing until the JSON formatter lands
-  # (deferred) — they're wired now so log shipping and analytics arrive as
-  # one story, not two migrations.
+  # under fields.* by tracing-subscriber's JSON formatter — the app emits
+  # JSON as of PR #19 (src/main.rs logging init), so these queries resolve
+  # against live data.
   # KNOWN CONSTRAINT: parse '*-*' splits pod_name at the FIRST hyphen, so a
   # hyphenated release name (the roster convention allows them) mis-buckets
   # — pod "some-api-6d5f4c-xyz" reports svc="some". Fine at demo scale;
@@ -260,22 +258,19 @@ resource "aws_cloudwatch_metric_alarm" "redis_engine_cpu" {
 # log_group_names pre-selects the group when opened in the console.
 # kubectl logs stays the local/degraded path.
 resource "aws_cloudwatch_query_definition" "logs_p95_by_service" {
-  # "(pending JSON logs)" suffix: the caveat travels to the console — these
-  # queries return nothing until the JSON formatter lands (see the locals
-  # header). Drop the suffix in the same PR that ships JSON logs.
-  name            = "${local.name}/p95-by-service (pending JSON logs)"
+  name            = "${local.name}/p95-by-service"
   log_group_names = [aws_cloudwatch_log_group.container_insights["application"].name]
   query_string    = local.q_logs_p95
 }
 
 resource "aws_cloudwatch_query_definition" "logs_errors_recent" {
-  name            = "${local.name}/errors-recent (pending JSON logs)"
+  name            = "${local.name}/errors-recent"
   log_group_names = [aws_cloudwatch_log_group.container_insights["application"].name]
   query_string    = local.q_logs_errors
 }
 
 # Cost visibility: which service is the ingest bill. est_bytes ~ pre-metadata
-# payload. Works today even on text logs — it needs only @message.
+# payload. Format-agnostic — it needs only @message.
 resource "aws_cloudwatch_query_definition" "logs_volume_by_service" {
   name            = "${local.name}/volume-by-service"
   log_group_names = [aws_cloudwatch_log_group.container_insights["application"].name]
@@ -387,7 +382,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         width  = 12
         height = 6
         properties = {
-          title  = "App p95 from request logs (5m bins — fills when JSON logs land)"
+          title  = "App p95 from request logs (5m bins)"
           region = data.aws_region.current.region
           view   = "timeSeries"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_p95_bin}"
@@ -400,7 +395,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         width  = 12
         height = 6
         properties = {
-          title  = "Recent 5xx (request logs — fills when JSON logs land)"
+          title  = "Recent 5xx (request logs — empty is healthy)"
           region = data.aws_region.current.region
           view   = "table"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_errors}"
