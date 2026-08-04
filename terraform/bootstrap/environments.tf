@@ -76,8 +76,8 @@ data "aws_iam_policy_document" "env_trust" {
           "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:environment:${each.key}",
         ],
         each.value.trust_main_ref ? [
-          "repo:${var.github_repo}:ref:refs/heads/master",
-          "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:ref:refs/heads/master",
+          "repo:${var.github_repo}:ref:refs/heads/main",
+          "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:ref:refs/heads/main",
         ] : []
       )
     }

@@ -11,9 +11,9 @@ What it mints:
 
 | Role | Trust (`sub` claim) | Power |
 |---|---|---|
-| `otel-demo-app-dev-ci` | `environment:dev` (+ master ref) | AdministratorAccess **inside** the `otel-demo-app-dev-boundary` permissions boundary |
+| `otel-demo-app-dev-ci` | `environment:dev` (+ main ref) | AdministratorAccess **inside** the `otel-demo-app-dev-boundary` permissions boundary |
 | `otel-demo-app-ci-plan` | any ref/PR of this repo | ReadOnlyAccess |
-| `otel-demo-app-ci-shared` | master ref / `environment:dev` | ECR admin on `otel-demo-app/*` + rw on its own state key only |
+| `otel-demo-app-ci-shared` | main ref / `environment:dev` | ECR admin on `otel-demo-app/*` + rw on its own state key only |
 
 State layout (one bucket, sibling keys): `otel-demo-app/bootstrap.tfstate`
 (this stack), `otel-demo-app/shared.tfstate` (ECR stack),

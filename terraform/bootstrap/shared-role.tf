@@ -1,7 +1,7 @@
 # CI identity for the account-shared stack (terraform/shared — the ECR
 # registry: repositories under otel-demo-app/*, single service `app` today).
 # The shared apply rides the dev pipeline's infra job, so trust covers the
-# subs that job can present: the plain master-ref sub, and environment:dev
+# subs that job can present: the plain main-ref sub, and environment:dev
 # for when the workflow declares `environment: dev`. Deliberately NOT any
 # other environment — staging/prod pipelines consume images, they never
 # administer the registry.
@@ -25,8 +25,8 @@ data "aws_iam_policy_document" "shared_trust" {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_repo}:ref:refs/heads/master",
-        "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:ref:refs/heads/master",
+        "repo:${var.github_repo}:ref:refs/heads/main",
+        "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:ref:refs/heads/main",
         "repo:${var.github_repo}:environment:dev",
         "repo:${local.gh_owner}@${local.gh_owner_id}/${local.gh_name}@${local.gh_repo_id}:environment:dev",
       ]
