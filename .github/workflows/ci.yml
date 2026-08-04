@@ -119,12 +119,21 @@ jobs:
       # (principal_arn -ci -> -ci-plan) — a standing phantom diff that
       # vanishes at apply, where the -ci role matches state. See the comment
       # on enable_cluster_creator_admin_permissions in modules/stack/eks.tf.
+      # -refresh=false: refreshing the env stack calls data-plane read APIs
+      # that ReadOnlyAccess deliberately excludes — observed live: refreshing
+      # aws_secretsmanager_secret_version needs secretsmanager:GetSecretValue,
+      # which the plan role is denied (AccessDeniedException). The PR plan is
+      # ADVISORY by design (the apply-time plan under the full-power role is
+      # the audit record and does refresh), so diffing against last-applied
+      # state is the honest fidelity level for this role. Granting the plan
+      # role GetSecretValue would also be defensible (it can already read the
+      # value from the state file) but adds IAM surface for zero gain.
       - if: steps.touched.outputs.tf == 'true'
         name: Plan env stack
         working-directory: terraform/envs/dev
         run: |
           terraform init
-          terraform plan -lock=false -no-color -input=false | tee plan.txt
+          terraform plan -refresh=false -lock=false -no-color -input=false | tee plan.txt
           { echo '### terraform/envs/dev'; echo '```'; tail -c 60000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # ── CD: GitHub Actions owns every apply. The only local Terraform is the
