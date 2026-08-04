@@ -21,7 +21,7 @@ terraform {
   # terraform/bootstrap/environments.tf. Siblings in the same bucket:
   # otel-demo-app/bootstrap.tfstate and otel-demo-app/shared.tfstate.
   backend "s3" {
-    bucket       = "TFSTATE-BUCKET-TODO" # replaced during bootstrap — see docs/bootstrap.md step 1
+    bucket       = "latent-rustinterview-tfstate" # replaced during bootstrap — see docs/bootstrap.md step 1
     key          = "otel-demo-app/envs/dev.tfstate"
     region       = "us-east-1"
     encrypt      = true

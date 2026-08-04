@@ -18,7 +18,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket       = "TFSTATE-BUCKET-TODO" # replaced during bootstrap — see docs/bootstrap.md step 1
+    bucket       = "latent-rustinterview-tfstate" # replaced during bootstrap — see docs/bootstrap.md step 1
     key          = "otel-demo-app/envs/staging.tfstate"
     region       = "us-east-1"
     encrypt      = true
