@@ -88,3 +88,21 @@ variable "alb_latency_threshold_seconds" {
   type    = number
   default = 0.5
 }
+
+# ── ElastiCache Redis knobs (elasticache.tf) ────────────────────────────────
+variable "redis_node_type" {
+  type    = string
+  default = "cache.t4g.micro" # ~$9/mo — plenty for one INCR counter
+}
+
+variable "redis_engine_version" {
+  type    = string
+  default = "7.1"
+}
+
+# The single HA knob: 1 = dev (no failover, no multi-AZ); >1 flips
+# automatic failover + multi-AZ together in elasticache.tf.
+variable "redis_num_cache_clusters" {
+  type    = number
+  default = 1
+}

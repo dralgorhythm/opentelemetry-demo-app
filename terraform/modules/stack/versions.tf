@@ -7,7 +7,8 @@ terraform {
   required_version = ">= 1.10" # 1.10+ gives native S3 state locking (use_lockfile)
 
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws    = { source = "hashicorp/aws", version = "~> 6.0" }
+    random = { source = "hashicorp/random", version = "~> 3.0" } # elasticache.tf AUTH token
   }
 }
 
