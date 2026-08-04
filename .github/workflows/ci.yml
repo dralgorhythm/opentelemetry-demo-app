@@ -62,6 +62,10 @@ jobs:
     if: github.event_name == 'pull_request' && vars.AWS_ACCOUNT_ID != '' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions: { id-token: write, contents: read }
+    env:
+      # Mirror the infra job's TF_VARs or the PR plan diverges from the apply.
+      TF_VAR_admin_principal_arn: "arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:user/admin"
+      TF_VAR_alert_email: "${{ vars.ALERT_EMAIL }}" # unset variable = empty = alerting stays unsubscribed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 2 } # PR checkout is the merge commit; HEAD^1 = base
@@ -79,8 +83,7 @@ jobs:
       - if: steps.touched.outputs.tf == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       # -lock=false: a read-only role can't write the S3 lock object, and an
-      # advisory plan doesn't need one. (Env-stack plan joins this job when
-      # terraform/envs/dev lands.)
+      # advisory plan doesn't need one.
       - if: steps.touched.outputs.tf == 'true'
         name: Plan shared stack
         working-directory: terraform/shared
@@ -88,6 +91,19 @@ jobs:
           terraform init
           terraform plan -lock=false -no-color -input=false | tee plan.txt
           { echo '### terraform/shared'; echo '```'; tail -c 20000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # PLAN-READING GOTCHA: the cluster's creator-admin access entry resolves
+      # from the CALLER, so under the read-only -ci-plan role every PR plan
+      # shows that entry + its policy association "must be replaced"
+      # (principal_arn -ci -> -ci-plan) — a standing phantom diff that
+      # vanishes at apply, where the -ci role matches state. See the comment
+      # on enable_cluster_creator_admin_permissions in modules/stack/eks.tf.
+      - if: steps.touched.outputs.tf == 'true'
+        name: Plan env stack
+        working-directory: terraform/envs/dev
+        run: |
+          terraform init
+          terraform plan -lock=false -no-color -input=false | tee plan.txt
+          { echo '### terraform/envs/dev'; echo '```'; tail -c 60000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # ── CD: GitHub Actions owns every apply. The only local Terraform is the
   # one-time apply of terraform/bootstrap (the CI identity) — docs/bootstrap.md.
@@ -105,6 +121,14 @@ jobs:
     environment: dev
     # One dev-mutating job at a time (group shared with future deploy/destroy).
     concurrency: { group: env-dev, cancel-in-progress: false }
+    env:
+      # Humans need their own access entry: the creator-admin entry goes to the
+      # APPLIER of this Terraform, which is the CI role — not you.
+      TF_VAR_admin_principal_arn: "arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:user/admin"
+      # The ALB-alarm email (terraform/modules/stack/alerting.tf). CI is the
+      # ONLY applier of this stack, so without this mapping the subscription
+      # is unreachable: set it via `gh variable set ALERT_EMAIL`.
+      TF_VAR_alert_email: "${{ vars.ALERT_EMAIL }}"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 } # full history: the diff below spans the whole pushed range
@@ -127,16 +151,18 @@ jobs:
             echo "tf=false" >> "$GITHUB_OUTPUT"
             echo "terraform/ untouched — skipping plan+apply"
           fi
-      # The SHARED stack applies as the scoped ci-shared role (the env role's
-      # boundary denies shared state by design). CI_SHARED_ROLE_ARN falls back
-      # to CI_ROLE_ARN until the bootstrap apply has set the variable.
+      # Two credentials in one job: the SHARED stack applies as the scoped
+      # ci-shared role (the env role's boundary denies shared state by
+      # design), then the env stack re-configures to the env's own role.
+      # CI_SHARED_ROLE_ARN falls back to CI_ROLE_ARN until the bootstrap
+      # apply has set the variable.
       - if: steps.touched.outputs.tf == 'true'
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with: { role-to-assume: "${{ vars.CI_SHARED_ROLE_ARN || vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
       - if: steps.touched.outputs.tf == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-      # ECR must exist before the (future) deploy job pushes images. The env
-      # stack (terraform/envs/dev) applies here too once it lands.
+      # The account-shared stack (ECR) applies FIRST: repos must exist before
+      # the (future) deploy job pushes images. Warm path is a ~10s no-op.
       - if: steps.touched.outputs.tf == 'true'
         name: Apply shared stack
         working-directory: terraform/shared
@@ -145,6 +171,27 @@ jobs:
           terraform plan -out=tfplan -no-color | tee plan.txt
           { echo '### terraform/shared (applied)'; echo '```'; tail -c 20000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           terraform apply -auto-approve tfplan
+      - if: steps.touched.outputs.tf == 'true'
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - if: steps.touched.outputs.tf == 'true'
+        working-directory: terraform/envs/dev
+        run: terraform init
+      - if: steps.touched.outputs.tf == 'true'
+        working-directory: terraform/envs/dev
+        run: terraform plan -out=tfplan -no-color | tee plan.txt
+      # The PR plan is advisory — state can drift between review and merge.
+      # THIS plan is the one auto-approved, so it goes in the run summary as
+      # the audit record of what was actually applied. (The first from-zero
+      # env apply is the long one: ~15-20 min for VPC + EKS.)
+      - if: steps.touched.outputs.tf == 'true'
+        name: Record the applied plan
+        working-directory: terraform/envs/dev
+        run: |
+          { echo '### terraform/envs/dev (applied)'; echo '```'; tail -c 60000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.touched.outputs.tf == 'true'
+        working-directory: terraform/envs/dev
+        run: terraform apply -auto-approve tfplan
 
   # Prove the image builds on PRs. Pushing needs ECR creds -> arrives with CD.
   docker-build:
