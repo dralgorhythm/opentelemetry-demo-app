@@ -13,11 +13,7 @@ terraform {
   }
 
   backend "s3" {
-    # TFSTATE-BUCKET-TODO is a placeholder: replace every occurrence in the
-    # repo (grep -r TFSTATE-BUCKET-TODO) with the real state bucket name
-    # BEFORE `terraform init` — docs/bootstrap.md step 1. Must stay
-    # identical to var.state_bucket below.
-    bucket       = "TFSTATE-BUCKET-TODO"
+    bucket       = "latent-rustinterview-tfstate"
     key          = "otel-demo-app/bootstrap.tfstate" # sibling of shared.tfstate and envs/<env>.tfstate
     region       = "us-east-1"
     encrypt      = true
@@ -59,5 +55,5 @@ variable "github_repo" {
 # default in lockstep with the backend block above.
 variable "state_bucket" {
   type    = string
-  default = "TFSTATE-BUCKET-TODO"
+  default = "latent-rustinterview-tfstate"
 }
