@@ -1,0 +1,202 @@
+name: promote
+
+# Build-once, promote-many: a gated environment never builds. It deploys an
+# immutable SHA the dev pipeline already built, deployed, and smoked — the
+# shared ECR is account-scoped for exactly this. The same button is the
+# environment BRING-UP: the infra job always applies, so a cold env
+# materializes (~15-20 min) and a warm one no-ops in seconds.
+#
+# N ENVIRONMENTS, ZERO WORKFLOW EDITS. `environment` is a free-form string,
+# not a choice list, because a choice list is a workflow edit per env. The
+# resolve job validates it against what actually exists in the repo
+# (terraform/envs/<env>/ + deploy/envs/<env>.yaml), so env #4 is a bootstrap
+# tfvars entry, a GitHub Environment, an env root and a values file — see
+# docs/bootstrap.md "Adding an environment". A typo can't reach the
+# environment-bearing jobs below (they `needs: resolve`), which matters:
+# GitHub AUTO-CREATES an unprotected environment for any name a running job
+# references, so an unvalidated typo would mint a gate-less environment.
+#
+# Approval story: resolve runs FIRST, with no `environment:`, so the
+# promotion manifest (service -> digest) is in the run summary BEFORE the
+# reviewer approves. The infra/deploy jobs carry `environment:` — the target
+# env's required reviewer + main-only branch policy gate them, and their
+# OIDC sub becomes environment:<env>, matching only that env's bounded role
+# (terraform/bootstrap/environments.tf). Caveat inherited from that design:
+# the terraform plan is rendered inside the approved job, so the reviewer
+# approves the SHA, not the infra diff.
+#
+# Dispatch from main (the branch policy on a protected env rejects other refs).
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (any env with a terraform/envs/<env> root — not dev)"
+        type: string
+        required: true
+      version:
+        description: "Full 40-char SHA or vX.Y.Z tag (empty = this ref's HEAD)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Pre-approval: validate the target, resolve the version, and PROVE the
+  # artifacts exist. Runs as the read-only plan role (broad sub trust — the
+  # only role assumable without an `environment:` key).
+  resolve:
+    if: vars.AWS_ACCOUNT_ID != ''
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    env:
+      AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}"
+      ECR_REPO: otel-demo-app
+      # Via env, never inlined into a run: script — a workflow_dispatch input
+      # is attacker-controlled the moment repo write access is.
+      ENVIRONMENT: ${{ inputs.environment }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 } # full history: v* tags resolve to SHAs
+      # The N-env guard. Shape first (this string becomes a path, a cluster
+      # name, and a GitHub environment), then existence.
+      - name: Validate the target environment
+        run: |
+          echo "$ENVIRONMENT" | grep -qE '^[a-z][a-z0-9-]{0,20}$' \
+            || { echo "::error::'$ENVIRONMENT' is not a valid environment name (^[a-z][a-z0-9-]{0,20}$)"; exit 1; }
+          # dev is continuously deployed from main by ci.yml and has no
+          # protection rules — promote exists for the GATED envs. Rolling dev
+          # back is `helm rollback` (a stopgap) or a revert PR (the fix).
+          [ "$ENVIRONMENT" != "dev" ] \
+            || { echo "::error::dev is continuously deployed by ci.yml — promote targets gated environments only"; exit 1; }
+          [ -d "terraform/envs/$ENVIRONMENT" ] \
+            || { echo "::error::no terraform/envs/$ENVIRONMENT — see docs/bootstrap.md 'Adding an environment'"; exit 1; }
+          [ -f "deploy/envs/$ENVIRONMENT.yaml" ] \
+            || { echo "::error::no deploy/envs/$ENVIRONMENT.yaml — the env-qualified values file is required"; exit 1; }
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with: { role-to-assume: "${{ vars.CI_PLAN_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - id: resolve
+        name: Resolve version input to a full SHA
+        run: |
+          if [ -z "$VERSION" ]; then
+            sha="${{ github.sha }}"
+          elif echo "$VERSION" | grep -qE '^v[0-9]'; then
+            sha=$(git rev-list -n1 "$VERSION" 2>/dev/null) || { echo "::error::tag $VERSION not found"; exit 1; }
+          else
+            sha="$VERSION"
+          fi
+          echo "$sha" | grep -qE '^[0-9a-f]{40}$' || { echo "::error::'$sha' is not a full 40-char commit SHA"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "promoting $sha to $ENVIRONMENT"
+      # The pre-approval artifact: what the reviewer is actually approving.
+      - name: Verify every roster image exists (promote only what dev has built)
+        env: { SHA: "${{ steps.resolve.outputs.sha }}" }
+        run: |
+          { echo "### Promotion manifest — $ENVIRONMENT @ \`$SHA\`"
+            echo ""
+            echo "| service | digest |"
+            echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          missing=0
+          while IFS=$'\t' read -r svc _f _ns; do
+            d=$(aws ecr describe-images --repository-name "${ECR_REPO}/$svc" \
+                  --image-ids imageTag="$SHA" \
+                  --query 'imageDetails[0].imageDigest' --output text 2>/dev/null) || d=""
+            if [ -z "$d" ] || [ "$d" = "None" ]; then
+              echo "::error::${ECR_REPO}/$svc has no image for $SHA — promote something the dev pipeline has built and smoked"
+              missing=$((missing + 1)); continue
+            fi
+            echo "| $svc | \`$d\` |" >> "$GITHUB_STEP_SUMMARY"
+          done < <(scripts/roster.sh)
+          [ "$missing" -eq 0 ]
+
+  # The approval gate. Always applies (drill-button semantics, matching
+  # ci.yml's dispatch path): cold bring-up and warm no-op are one button.
+  infra:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    environment: ${{ inputs.environment }}
+    # Same per-env group as ci.yml's dev jobs and destroy.yml: never apply
+    # mid-helm-upgrade or mid-destroy.
+    concurrency: { group: "env-${{ inputs.environment }}", cancel-in-progress: false }
+    env:
+      # Mirror ci.yml's infra job or the promoted stack diverges from dev's.
+      TF_VAR_admin_principal_arn: "${{ vars.ADMIN_PRINCIPAL_ARN }}"
+      TF_VAR_alert_email: "${{ vars.ALERT_EMAIL }}"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # vars.CI_ROLE_ARN resolves to the ENVIRONMENT-scoped variable here:
+      # each protected environment carries its own bounded role ARN, and the
+      # repo-level value (dev's) is the fallback that this job never wants.
+      # An env without that variable set assumes dev's role and its boundary
+      # denies the whole apply — noisy, but it fails closed.
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - name: Apply the environment stack
+        working-directory: terraform/envs/${{ inputs.environment }}
+        run: |
+          terraform init
+          terraform plan -out=tfplan -no-color | tee plan.txt
+          { echo "### terraform/envs/${{ inputs.environment }} (applied)"; echo '```'; tail -c 60000 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          terraform apply -auto-approve tfplan
+
+  deploy:
+    needs: [resolve, infra]
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    environment: ${{ inputs.environment }}
+    concurrency: { group: "env-${{ inputs.environment }}", cancel-in-progress: false }
+    env:
+      AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}"
+      ECR_REPO: otel-demo-app
+      DEPLOY_ENV: ${{ inputs.environment }}
+      CLUSTER: "otel-demo-app-${{ inputs.environment }}"
+      SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      # Checkout AT THE PROMOTED SHA: the promoted unit is image + chart +
+      # values + roster as of that commit, not main-HEAD config layered over
+      # an old image.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { ref: "${{ needs.resolve.outputs.sha }}" }
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+        id: ecr
+      # No build step anywhere in this workflow, on purpose: if the image
+      # isn't already in ECR, resolve failed the run.
+      - name: Deploy the roster at the promoted SHA
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          # Cluster-scoped config first: the ADOT collector the app exports
+          # traces to must exist before any release that points at it.
+          kubectl apply -f deploy/cluster/
+          while IFS=$'\t' read -r svc f ns; do
+            # deploy/envs/<env>.yaml is the LAST -f: environment-qualified
+            # values override the service file (that's where the env's
+            # Secrets Manager config-secret name lives).
+            helm upgrade --install "$svc" ./charts/app -f "$f" -f "deploy/envs/${DEPLOY_ENV}.yaml" \
+              --set "image.repository=${{ steps.ecr.outputs.registry }}/${ECR_REPO}/$svc" \
+              --set "image.tag=$SHA" \
+              -n "$ns" --create-namespace --wait --atomic --timeout 5m
+          done < <(scripts/roster.sh)
+      # Same gate as dev's: healthz + greeting through the ALB, and the
+      # visitor counter must INCREMENT across two calls — this environment's
+      # own ElastiCache TLS+AUTH round trip, end to end.
+      #
+      # No EXPECT_SHA: the app has no build stamp (deferred with
+      # service.version), so this proves the environment is HEALTHY, not that
+      # the promoted SHA is the one serving — `helm --wait --atomic` above is
+      # what backs that claim. Adding the stamp upgrades this line for free.
+      - name: Smoke the promoted environment (the gate)
+        run: |
+          scripts/smoke.sh cloud
+          HOST=$(kubectl -n otel-demo get ingress app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "### ${DEPLOY_ENV} serving at http://$HOST — smoked green at \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          # Rollback reference, same as ci.yml's deploy job: re-run promote
+          # with the previous SHA is the durable path; `helm rollback` is the
+          # stopgap. Non-fatal — the smoke call above is the gate.
+          { echo ""; echo "Release revisions (rollback ref):"; echo '```'; helm list -A || echo "(helm list failed — smoke gate above is authoritative)"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

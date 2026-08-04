@@ -50,17 +50,31 @@ jobs:
           for f in deploy/services/*.yaml; do
             helm template "$(basename "$f" .yaml)" charts/app -f "$f" >/dev/null
           done
-      # CONTENT asserts on the dev-composed render, not just exit codes: the
+      # CONTENT asserts on the env-composed render, not just exit codes: the
       # CSI mount must name the env-qualified secret, the args must point at
       # the mounted config file, and the amd64 arch pin must survive the
       # merge (nodeSelector is a map — a well-meaning `{}` in a later -f
       # would deep-merge and silently keep or drop nothing a render-only
       # check would notice).
+      #
+      # EVERY environment, not just dev: promote.yml deploys a gated env from
+      # these same files, and a values file that only gets rendered at
+      # promote time is a values file that breaks during an approval window.
+      # The secret-name assert is derived from the filename, so it doubles as
+      # the naming-convention gate (deploy/envs/<env>.yaml must name
+      # otel-demo-app-<env>/app/config, matching local.name in the stack
+      # module) — that convention is what lets promote.yml take a bare env
+      # string and need no per-env wiring.
       - run: |
-          out=$(helm template smoke charts/app -f deploy/services/app.yaml -f deploy/envs/dev.yaml)
-          grep -q 'objectName: "otel-demo-app-dev/app/config"' <<<"$out"
-          grep -q -- '/mnt/secrets-store/config.yml' <<<"$out"
-          grep -q 'kubernetes.io/arch: amd64' <<<"$out"
+          for envf in deploy/envs/*.yaml; do
+            env=$(basename "$envf" .yaml)
+            out=$(helm template smoke charts/app -f deploy/services/app.yaml -f "$envf")
+            grep -q "objectName: \"otel-demo-app-${env}/app/config\"" <<<"$out" \
+              || { echo "::error::$envf must name the otel-demo-app-${env}/app/config secret"; exit 1; }
+            grep -q -- '/mnt/secrets-store/config.yml' <<<"$out"
+            grep -q 'kubernetes.io/arch: amd64' <<<"$out"
+            echo "rendered $env ✓"
+          done
       # The only gate that ever looks at the scripts in this repo.
       - run: shellcheck scripts/*.sh
       # fs scan: catches secrets and known-CVE deps (Cargo.lock) before any

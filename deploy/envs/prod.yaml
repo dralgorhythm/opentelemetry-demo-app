@@ -1,7 +1,8 @@
 # Environment-qualified values for PROD — see deploy/envs/dev.yaml for
 # the mechanism (last -f in every cloud helm loop; env-name keys only).
-# SCAFFOLD: the prod environment is never applied today (bootstrap's env
-# map is dev-only) — this file exists so promotion is a values diff, not a
-# structure change.
+# Consumed by `promote.yml` (environment=prod) as the last -f. The secret
+# name MUST stay otel-demo-app-<env>/app/config — the ci.yml gates job
+# derives that assert from this filename, and it is what lets promote.yml
+# take a bare env string with no per-env wiring.
 secrets:
   name: otel-demo-app-prod/app/config
