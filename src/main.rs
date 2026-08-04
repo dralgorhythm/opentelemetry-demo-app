@@ -25,7 +25,7 @@ fn setup_tracing() -> Result<opentelemetry_sdk::trace::SdkTracerProvider, Box<dy
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
 
-    // Initialize OTLP exporter using HTTP binary protocol
+    // Initialize OTLP exporter using gRPC (tonic)
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_protocol(Protocol::Grpc)

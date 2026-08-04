@@ -46,17 +46,22 @@ aws s3api put-public-access-block --bucket "$BUCKET" \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-Then wire the repo to it — the bucket name is committed as the placeholder
-`TFSTATE-BUCKET-TODO`; **replace every occurrence** before `init`:
+Then wire the repo to it. The tree commits the **real** bucket name,
+`latent-rustinterview-tfstate` — six occurrences: the five backend blocks
+(`terraform/bootstrap/versions.tf`, `terraform/shared/versions.tf`,
+`terraform/envs/{dev,staging,prod}/main.tf`) plus the `state_bucket`
+variable default in `terraform/bootstrap/versions.tf`. On a fork or a new
+account, **replace every occurrence** with your bucket before `init`:
 
 ```bash
-grep -rl TFSTATE-BUCKET-TODO . | xargs sed -i '' "s/TFSTATE-BUCKET-TODO/$BUCKET/g"
-grep -r TFSTATE-BUCKET-TODO . && echo "STILL DIRTY" || echo "clean"
+OLD=latent-rustinterview-tfstate
+grep -rl "$OLD" terraform | xargs sed -i '' "s/$OLD/$BUCKET/g"
+grep -rn "$OLD" terraform && echo "STILL DIRTY" || echo "clean"
 ```
 
-(Both occurrences — the backend block and the `state_bucket` variable
-default in `terraform/bootstrap/versions.tf` — must stay identical: the
-permission boundaries deny foreign-state access by bucket+key.)
+(The backend block and the `state_bucket` variable default in
+`terraform/bootstrap/versions.tf` must stay identical: the permission
+boundaries deny foreign-state access by bucket+key.)
 
 Commit the replacement on your bootstrap branch.
 
@@ -75,6 +80,10 @@ budgets filter on the `Environment` cost-allocation tag — activate it once
 TagKey=Environment,Status=Active`) and allow ~24h; until then they
 harmlessly match $0.
 
+**Re-applies:** any later change under `terraform/bootstrap/` requires the
+same local re-apply (`terraform -chdir=terraform/bootstrap apply`) — CI
+never touches this stack.
+
 ## 3 · Tell CI the account and the roles
 
 Workflows assume roles by repo variable; the bootstrap outputs are the
@@ -88,8 +97,24 @@ gh variable set CI_ROLE_ARN        --body "$(terraform output -raw ci_role_arn)"
 gh variable set CI_PLAN_ROLE_ARN   --body "$(terraform output -raw ci_plan_role_arn)"
 gh variable set CI_SHARED_ROLE_ARN --body "$(terraform output -raw ci_shared_role_arn)"
 gh variable set ALERT_EMAIL        --body "<you@example.com>"   # optional; workload-stack alerting, separate wire from step 2's budget email
+gh variable set ADMIN_PRINCIPAL_ARN --body "<your-iam-principal-arn>"   # optional but recommended; see below
 cd -
 ```
+
+`ADMIN_PRINCIPAL_ARN` is your **human** principal's IAM ARN. The
+creator-admin EKS access entry goes to the *applier* of the Terraform —
+which is the CI role, not you — so leaving this empty means no human
+access entry: your own `kubectl` will be Unauthorized. Identity Center
+caveat: use the underlying role ARN **with its path**, e.g.
+`arn:aws:iam::<acct>:role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_...`
+— **not** the `sts` assumed-role ARN — and note the suffix changes if the
+permission set is ever reprovisioned. The infra job in
+`.github/workflows/ci.yml` carries the same caveats as a comment where the
+variable is consumed.
+
+Fork gotcha: `gh variable set` may not honor `gh repo set-default <fork>`
+(observed with gh 2.97.0 resolving to the fork parent) — pass an explicit
+`-R <owner>/<repo>` on each command above.
 
 ## 4 · Create the GitHub environment `dev`
 

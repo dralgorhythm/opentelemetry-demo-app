@@ -5,7 +5,6 @@ use tower_http::trace::{
 };
 use tracing::field::Empty;
 
-// pub fn create_trace_layer() -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>> {
 pub fn create_trace_layer() -> TraceLayer<
     tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
     impl MakeSpan<Body> + Clone,

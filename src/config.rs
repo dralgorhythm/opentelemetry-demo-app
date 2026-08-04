@@ -7,7 +7,7 @@ fn default_redis_url() -> String {
 }
 
 fn default_listen_address() -> String {
-    "127.0.0.1:3000".to_string()
+    "127.0.0.1:8080".to_string()
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -28,10 +28,10 @@ impl Config {
                 let mut config: Config = serde_yaml::from_str(&contents)?;
                 // Ensure we have defaults for any missing fields
                 if config.redis_url.is_empty() {
-                    config.redis_url = "redis://127.0.0.1:6379".to_string();
+                    config.redis_url = default_redis_url();
                 }
                 if config.listen_address.is_empty() {
-                    config.listen_address = "127.0.0.1:3000".to_string();
+                    config.listen_address = default_listen_address();
                 }
                 Ok(config)
             }
@@ -78,7 +78,7 @@ mod tests {
         let path = write_temp("empty-map.yml", "{}\n");
         let config = Config::load_from_file(path.to_str().unwrap()).unwrap();
         assert_eq!(config.redis_url, "redis://127.0.0.1:6379");
-        assert_eq!(config.listen_address, "127.0.0.1:3000");
+        assert_eq!(config.listen_address, "127.0.0.1:8080");
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod tests {
         );
         let config = Config::load_from_file(path.to_str().unwrap()).unwrap();
         assert_eq!(config.redis_url, "redis://127.0.0.1:6379");
-        assert_eq!(config.listen_address, "127.0.0.1:3000");
+        assert_eq!(config.listen_address, "127.0.0.1:8080");
     }
 
     #[test]
