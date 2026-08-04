@@ -42,10 +42,18 @@ spec:
       # protects against a node CRASH taking every replica at once.
       topologySpreadConstraints:
         # Across nodes: HARD. A pod that can't co-locate is itself the signal
-        # that makes Karpenter provision the second node.
+        # that makes Karpenter provision the second node — but ONLY with
+        # minDomains set. On a one-node cluster there is a single topology
+        # domain, so the skew is 0, DoNotSchedule is trivially satisfied, and
+        # no such signal is ever produced: every replica co-locates on the one
+        # node and the constraint silently does nothing. That was the observed
+        # state here — 2 replicas pinned to 1 node — until this landed.
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
+          {{- with .Values.topologySpread.minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
           labelSelector:
             matchLabels:
               {{- include "app.selectorLabels" . | nindent 14 }}
