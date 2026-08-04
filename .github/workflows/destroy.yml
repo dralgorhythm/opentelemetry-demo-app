@@ -40,6 +40,8 @@ jobs:
             || { echo "::error::no terraform/envs/$ENVIRONMENT — nothing to destroy"; exit 1; }
 
   destroy:
+    # The vars gate stays a job condition (pre-bootstrap repos skip cleanly);
+    # the confirm check is a STEP below so a typo turns the run RED.
     needs: validate
     if: vars.AWS_ACCOUNT_ID != '' && inputs.confirm == 'destroy'
     # Two keys per destroy: the typed confirmation above, plus the TARGET
@@ -56,6 +58,12 @@ jobs:
     concurrency: { group: "env-${{ inputs.environment }}", cancel-in-progress: false }
     env: { AWS_REGION: "${{ vars.AWS_REGION || 'us-east-1' }}", CLUSTER: "otel-demo-app-${{ inputs.environment }}" }
     steps:
+      # First, before anything runs: a mistyped confirm string must be a RED
+      # run with an explanation — a green "skipped" reads as a successful
+      # teardown to anyone glancing at the Actions list.
+      - name: Require the typed confirmation
+        run: |
+          [ "${{ inputs.confirm }}" = "destroy" ] || { echo "::error::type 'destroy' to confirm the teardown"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with: { role-to-assume: "${{ vars.CI_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }

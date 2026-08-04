@@ -14,7 +14,11 @@
 variable "environments" {
   description = "Environments this account hosts. Key = env name; drives the role, boundary, and budget per env."
   type = map(object({
-    budget_usd = optional(number, 25)
+    # Sized ABOVE the documented steady state (DECISIONS #17: a continuously
+    # deployed env runs ~$120+/mo — NAT + EKS control plane + nodes), so a
+    # breach means a leak or a runaway, not the budget re-discovering the
+    # baseline every month.
+    budget_usd = optional(number, 150)
     # Also trust the plain main-ref sub: needed by any main-branch job that
     # runs WITHOUT `environment: <env>` (a job with the environment key
     # presents the environment sub INSTEAD of the ref sub). Dev keeps it on
@@ -211,9 +215,13 @@ resource "aws_iam_policy" "env_boundary" {
         {
           Sid    = "DenySharedEcrAdministration"
           Effect = "Deny"
+          # BatchDeleteImage included: push stays open, but deleting images
+          # (the immutable SHAs sibling environments run on) is
+          # administration and belongs behind the ci-shared role.
           Action = [
             "ecr:DeleteRepository", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy",
             "ecr:SetRepositoryPolicy", "ecr:DeleteRepositoryPolicy", "ecr:PutImageTagMutability",
+            "ecr:BatchDeleteImage",
           ]
           Resource = "arn:aws:ecr:*:*:repository/${var.project}/*"
         },
@@ -222,16 +230,23 @@ resource "aws_iam_policy" "env_boundary" {
         {
           Sid    = "DenySiblingNamespaces"
           Effect = "Deny"
-          # Tag-blind name belt on sibling-env prefixes. Extend the ARN list
-          # with compute-platform resources (ECS/EKS cluster names, etc.)
-          # when the workload stack picks one.
-          Action = ["secretsmanager:*", "s3:*", "logs:*", "cloudwatch:PutDashboard", "cloudwatch:DeleteDashboards"]
+          # Tag-blind name belt on sibling-env prefixes, covering the
+          # platforms the workload stack actually picked: EKS clusters and
+          # ElastiCache replication groups alongside Secrets Manager, S3,
+          # logs, and dashboards. The logs patterns name the REAL log-group
+          # namespaces this stack creates (/aws/containerinsights/<name>/*
+          # from logging.tf, /aws/eks/<name>/cluster from the control
+          # plane), plus the generic <name>-* for module-named groups.
+          Action = ["secretsmanager:*", "s3:*", "logs:*", "eks:*", "elasticache:*", "cloudwatch:PutDashboard", "cloudwatch:DeleteDashboards"]
           Resource = flatten([for o in local.env_siblings[each.key] : [
             "arn:aws:secretsmanager:*:*:secret:${var.project}-${o}/*",
             "arn:aws:s3:::${var.project}-${o}-*",
             "arn:aws:s3:::${var.project}-${o}-*/*",
-            "arn:aws:logs:*:*:log-group:/${var.project}-${o}/*",
+            "arn:aws:logs:*:*:log-group:/aws/containerinsights/${var.project}-${o}/*",
+            "arn:aws:logs:*:*:log-group:/aws/eks/${var.project}-${o}/*",
             "arn:aws:logs:*:*:log-group:${var.project}-${o}-*",
+            "arn:aws:eks:*:*:cluster/${var.project}-${o}",
+            "arn:aws:elasticache:*:*:replicationgroup:${var.project}-${o}-*",
             "arn:aws:cloudwatch::*:dashboard/${var.project}-${o}-*",
           ]])
         },
