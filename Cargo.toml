@@ -20,7 +20,11 @@ rustls = { version = "0.23", default-features = false, features = ["tls12"] }
 bb8-redis = "0.18"
 tracing = "0.1.41"
 tracing-opentelemetry = "0.31.0"
-tracing-subscriber = {version = "0.3", features = ["env-filter"] }
+# "json" backs the JSON formatter in setup_tracing(). The nesting it
+# produces (event fields under `fields`, NOT flattened) is load-bearing: the
+# saved Logs Insights queries and the dashboard's p95 widget read
+# log_processed.fields.* (terraform/modules/stack/alerting.tf).
+tracing-subscriber = {version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = "0.30.0"
 opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.30.0"

@@ -50,12 +50,27 @@ fn setup_tracing() -> Result<opentelemetry_sdk::trace::SdkTracerProvider, Box<dy
 
     let tracer = tracer_provider.tracer("opentelemetry-demo-app");
 
-    // Initialize tracing subscriber with OpenTelemetry layer
+    // Initialize tracing subscriber with OpenTelemetry layer.
+    //
+    // JSON, not the human formatter: the CloudWatch observability add-on's
+    // Fluent Bit parses a JSON log line and nests it under `log_processed`
+    // (Merge_Log_Key), which is what the saved Logs Insights queries and the
+    // dashboard's p95 widget read — see terraform/modules/stack/alerting.tf.
+    // Text logs left every one of those returning zero rows.
+    //
+    // Do NOT add .flatten_event(true): it lifts event fields to the top
+    // level, and those queries address them as log_processed.fields.* (the
+    // formatter's default nesting). The producing event lives in
+    // middleware.rs ("HTTP request completed" with status_code/latency_ms)
+    // and already carried the right fields — only the encoding was wrong.
+    //
+    // Local runs stay readable via `| jq`; docker-compose's Jaeger UI is the
+    // nicer local view either way.
     tracing_subscriber::registry()
         .with(EnvFilter::new(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         ))
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().json())
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 

@@ -112,13 +112,21 @@ forks already chosen.
 
 ## Observability
 
-- **JSON log formatter.** Honest gap: the saved Logs Insights queries and the
-  dashboard's p95 row (`terraform/modules/stack/alerting.tf`) parse
-  `log_processed.fields.*`, but the app emits human-readable text logs today
-  — those queries return empty until the app switches to
-  `tracing_subscriber`'s JSON formatter and logs a structured
-  "HTTP request completed" event with `latency_ms`/`status_code`. The infra
-  side is deliberately already correct.
+- ~~**JSON log formatter.**~~ Landed: the app emits JSON via
+  `tracing_subscriber`'s formatter, so the saved Logs Insights queries and
+  the dashboard's p95 row (`terraform/modules/stack/alerting.tf`) resolve
+  against `log_processed.fields.*` instead of returning empty. The
+  encoding was only half of it — `latency_ms` was reaching the log as the
+  *string* `"5"` because `Duration::as_millis` returns `u128` and `tracing`
+  has no `Value` impl for it (Debug fallback); `avg()`/`pct()` can't
+  aggregate a string, so the p95 widget needed the `as u64` cast too.
+- **Trace id in log lines.** The logs are structured and the traces are
+  real, but nothing carries a `trace_id` field into the log event, so
+  "found a slow request in Logs Insights → open that trace in X-Ray" is
+  still a manual timestamp hunt. First step: a small `tracing` layer (or
+  `OpenTelemetrySpanExt::context()`) that records the current span's
+  trace id onto the event, then a `trace_id` column in the
+  `errors-recent` saved query.
 - **Trace context + version stamping.** No W3C propagator is registered
   (inbound traceparent headers start new traces) and the app doesn't report
   `service.version`, so the smoke gate can't assert "this SHA is serving."

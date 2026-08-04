@@ -155,9 +155,17 @@ pub fn create_trace_layer() -> TraceLayer<
                     span.record("http.response.body.size", content_length);
                 }
 
+                // `as u64` is load-bearing, not a lint fix. Duration::as_millis
+                // returns u128, and `tracing` has no Value impl for u128 — it
+                // falls back to Debug recording, which serializes as the STRING
+                // "5" instead of the number 5. CloudWatch Logs Insights can't
+                // avg()/pct() a string, so the dashboard's p95 widget and the
+                // p95-by-service saved query (terraform/modules/stack/
+                // alerting.tf) would still return empty with JSON logs on.
+                // u64 milliseconds overflows after ~584 million years.
                 tracing::info!(
                     status_code = response.status().as_u16(),
-                    latency_ms = latency.as_millis(),
+                    latency_ms = latency.as_millis() as u64,
                     "HTTP request completed"
                 );
             },
