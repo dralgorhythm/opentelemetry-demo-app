@@ -1,6 +1,13 @@
 target/
 .git/
 .github/
+.claude/
+**/.terraform/
+terraform/
+charts/
+deploy/
+docs/
+scripts/
 docker-compose.yaml
 README.md
 config.yml

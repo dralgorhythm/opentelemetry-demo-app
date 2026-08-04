@@ -14,6 +14,7 @@ ingress.enabled=false — ClusterIP only, reachable in-cluster as:
 {{- if .Values.networkPolicy.enabled }}
 
 NetworkPolicy is on ({{ if .Values.networkPolicy.allowFromApp }}ingress only from app={{ .Values.networkPolicy.allowFromApp }}{{ else }}default-deny{{ end }}).
-Enforcement requires the network policy controller (deploy/cluster/) — verify
+Enforcement requires the VPC CNI's network policy controller (a cluster
+add-on configuration — not enabled here; see docs/DEFERRED.md) — verify
 with the negative test, not by reading the policy.
 {{- end }}

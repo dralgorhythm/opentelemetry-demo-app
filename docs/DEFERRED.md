@@ -21,6 +21,17 @@ forks already chosen.
   and set default-deny + explicit app→collector/app→DNS allows — then prove
   enforcement with a blocked request, since an unenforced policy reads
   identically to an enforced one.
+- **Edge abuse controls.** Anonymous `GET /` performs a Redis write with no
+  WAF, rate limit, or CDN in front — an unauthenticated cost/abuse surface.
+  Accepted for the demo: the blast radius is one $9/mo cache node. First
+  step: an AWS WAF rate-based rule associated with the ALB
+  (`aws_wafv2_web_acl` + association), or CloudFront in front of it.
+- **IngressClass ownership.** The chart renders the cluster-scoped
+  `IngressClass`/`IngressClassParams` pair inside each release, so a second
+  ingress-enabled service would hit a Helm cross-release ownership conflict
+  on the shared objects. First step: per-service unique `className`s in
+  values, or move the pair to `deploy/cluster/` where cluster-scoped things
+  live — not moved now because a live move orphans and recreates the ALB.
 
 ## Multi-environment
 
@@ -43,6 +54,23 @@ forks already chosen.
   token, with Terraform ignoring the secret value — rotation stops being
   `terraform apply -replace=random_password.redis_auth` and the token leaves
   state entirely.
+- **AUTH-token rotation drill.** No layer owns "config changed → pods
+  restart" — nothing watches the CSI-mounted secret, so a rotation that
+  stops at `terraform apply` leaves pods on the old token. The drill:
+  `terraform apply -replace=random_password.redis_auth`, then
+  `kubectl rollout restart deploy/app -n otel-demo`. Note
+  `auth_token_update_strategy = ROTATE` keeps the old token valid until a
+  later apply flips the strategy to `SET` — rotation isn't complete until
+  then. First step: write this runbook down (`docs/runbook.md`) and name it
+  the owner of the restart, then exercise it once.
+- **TLS-protocol drift (rustls features).** The first live incident's most
+  expensive lesson: a dependency's default-features drift silently compiled
+  rustls down to TLS 1.3-only while ElastiCache negotiates only TLS 1.2 —
+  every gate stayed green while every connection failed (`Cargo.toml`
+  carries the pinned `tls12` feature and the full story). First step: an
+  integration smoke in CI against a TLS-enabled Redis so protocol drift
+  fails a gate, and tracking ElastiCache TLS 1.3 support so the pin can
+  eventually retire.
 - **Valkey.** ~20% cheaper, drop-in for this INCRBY workload; kept Redis
   because the prompt named it. First step: `engine = "valkey"` + engine
   version in the replication group.

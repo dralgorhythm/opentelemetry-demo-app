@@ -1,5 +1,7 @@
-# OpenTelemetry Demo App Configuration
-# This file contains default configuration values that can be overridden by CLI arguments
+# OpenTelemetry Demo App Configuration — local-development defaults.
+# In-cluster this entire file is replaced by the CSI-mounted secret
+# (see deploy/services/app.yaml). The only CLI surface is -f/--config-file;
+# there are no per-value overrides.
 
 # Redis connection URL
 redis_url: "redis://127.0.0.1:6379"

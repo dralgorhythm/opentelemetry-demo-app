@@ -56,6 +56,7 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
 | #7 | `charts/app`, `deploy/` roster + env values, ADOT collector manifest, helm CI gates |
 | #8 | CD: deploy + release jobs, `scripts/smoke.sh` deploy gate, `destroy.yml` |
 | #9 | These docs |
+| #10–#12 | Production hardening from the first live incident: smoke-gate exec bit; real Redis error surfacing (bb8's default `NopErrorSink` had been masking every connection failure); the security-group hypothesis disproved by live test and reverted; rustls `tls12` feature restored — redis-rs had compiled TLS 1.2 out while ElastiCache negotiates only TLS 1.2 |
 
 ## Bring-up from zero
 
@@ -68,6 +69,9 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
    `scripts/smoke.sh cloud` — healthz + greeting through the ALB, plus
    **visitor-counter monotonicity**, which proves the ElastiCache TLS+AUTH
    round trip end to end. The run summary prints the serving URL.
+   Releases are driven by PR titles via the merge commit (merge-commit or
+   squash); rebase-merge would bypass bump detection — disable it in repo
+   settings.
 
 ## Teardown
 
