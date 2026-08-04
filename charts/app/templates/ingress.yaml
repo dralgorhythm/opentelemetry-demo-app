@@ -9,12 +9,34 @@ metadata:
     # ip mode targets pod IPs directly (VPC CNI) — required with a ClusterIP
     # Service; the default (instance) needs NodePort. scheme is NOT set here:
     # under Auto Mode it belongs in IngressClassParams (see ingressclass.yaml).
-    # No healthcheck-path annotation: the ALB's default check is GET /, which
-    # this app 200s (the greeting + counter). Note "/" touches Redis, so a
-    # Redis outage flips ALB targets unhealthy — the honest degradation for
-    # a service whose one page IS the Redis round-trip. A service without a
-    # real "/" must set alb.ingress.kubernetes.io/healthcheck-path.
     alb.ingress.kubernetes.io/target-type: ip
+    # The ALB checks the SAME dependency-free path the kubelet probes do
+    # (.Values.probePath, one definition — deployment.yaml reads it too).
+    # Without this the ALB defaults to GET /, and that was measurably wrong
+    # here on two counts.
+    #
+    # 1. It bought nothing. A health check's job is ROUTING — eject a bad
+    #    target so traffic reaches a good one. That only works when failures
+    #    are per-target, and Redis here is ONE shared ElastiCache primary, so
+    #    a Redis outage hits every pod identically. Checking "/" could only
+    #    mark ALL targets unhealthy, turning an honest 500 into a 503 with
+    #    nothing left to route to — the same total-outage conversion that
+    #    DECISIONS #15 keeps the kubelet probes off "/" to avoid. Per-target
+    #    failures that DO matter (wedged runtime, deadlock, OOM thrash) fail
+    #    this path too, because the same axum runtime serves it.
+    #
+    # 2. It cost real work. "/" performs a Redis INCRBY, so every check was a
+    #    write: ~8/min at 2 targets on a 15s interval, which inflated the
+    #    visitor counter (observed climbing with zero users), added constant
+    #    ElastiCache write load, and — since "/" is traced and this path
+    #    deliberately is not (src/routes.rs registers it AFTER the trace
+    #    layer) — billed X-Ray for health-check spans and diluted the p95
+    #    dashboard with them.
+    #
+    # A service whose "/" is genuinely side-effect-free can drop this and let
+    # the ALB check real behavior. Edge dependency-awareness belongs in an
+    # alarm or synthetic canary, not in the routing health check.
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.probePath }}
 spec:
   ingressClassName: {{ .Values.ingress.className }} # declared in ingressclass.yaml; Auto Mode reifies it as an ALB
   rules:
