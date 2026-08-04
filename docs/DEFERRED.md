@@ -106,10 +106,23 @@ forks already chosen.
   single-arch image (DECISIONS #13) — multi-arch builds would widen both
   the pool requirement and the pod nodeSelector to Graviton, worth roughly
   another 20%.
-- **HPA + load testing.** The chart has an `hpa.yaml` template; resource
-  requests are folklore until measured. First step: a k6/vegeta run against
-  the ALB to find the loaded steady-state, then set requests and enable the
-  HPA at 70% CPU (metrics-server is already installed).
+- ~~**Load testing.**~~ Done (dev, 2026-08-04): ~199k requests over 11 min
+  through the ALB, peaking at 1073 rps. Per-pod cost measured from Container
+  Insights — cpu 0.3m idle / 198m peak, memory 2.0 MiB idle / 6.6 MiB peak,
+  zero 5xx, zero restarts. The numbers and what they justify now live in
+  `charts/app/values.yaml` next to the requests themselves.
+- **HPA, still off — and now off for a reason.** The requests are no longer
+  folklore, so the blocker is gone; what's missing is a REASON. Two replicas
+  absorbed 1073 rps with latency *improving* as concurrency rose, so the
+  service never reached its knee and has no demonstrated need to scale. At
+  70% of a 100m request, scale-out would fire near ~190 rps/pod. First step
+  when a real traffic pattern appears: `autoscaling.enabled: true` — one
+  values change, no chart work (metrics-server is already installed).
+- **Re-measure with the load profile that matters.** Everything above is a
+  single synthetic shape (GET `/`, one Redis INCRBY per request, keepalive
+  connections). It establishes a floor, not a model: a workload with larger
+  payloads, cold connections, or a slower Redis would move CPU per request
+  substantially.
 
 ## Observability
 
