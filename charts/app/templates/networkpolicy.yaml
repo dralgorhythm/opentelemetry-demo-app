@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny ingress to this service's pods; optionally allow exactly one
+# caller. "Two pods can talk" is default Kubernetes — this makes it "two pods
+# are ALLOWED to talk", which is the actual security posture.
+#
+# Enforcement is NOT free on Auto Mode: the network policy controller must
+# be enabled (not on by default). An unenforced policy looks identical to an
+# enforced one — always verify with the negative test (a debug pod's blocked
+# request is the proof).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  # Ingress-only: egress stays open. The alternative — egress lockdown —
+  # needs allow rules for Redis/OTLP/DNS; its trigger is exfiltration concern
+  # outweighing that maintenance.
+  policyTypes: [Ingress]
+  ingress:
+    {{- if .Values.networkPolicy.allowFromApp }}
+    - from:
+        # podSelector alone matches same-NAMESPACE pods only (cross-namespace
+        # needs namespaceSelector too) — load-bearing: same-label pods in
+        # other namespaces stay excluded.
+        - podSelector:
+            matchLabels:
+              app: {{ .Values.networkPolicy.allowFromApp }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.port }}
+    {{- end }}
+{{- end }}

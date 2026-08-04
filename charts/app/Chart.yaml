@@ -1,0 +1,10 @@
+apiVersion: v2
+name: app
+description: >-
+  The platform's generic service chart: one chart, N services. Each service is
+  a release of this chart shaped by a values file in deploy/services/. The
+  chart knows nothing about any particular service.
+type: application
+version: 0.1.0      # chart version — hand-bumped on packaging changes; CI's
+                    # releases version the APP (image.tag), never this
+appVersion: "0"     # meaningless here — image.tag is always set per-release by CI

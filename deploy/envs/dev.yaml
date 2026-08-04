@@ -1,0 +1,6 @@
+# Environment-qualified values for DEV — applied as the LAST -f in every
+# cloud helm loop (after the service's values file; later -f wins). Only
+# keys that embed the environment NAME belong here: account-specific values
+# (image repo) still ride in via --set from CI.
+secrets:
+  name: otel-demo-app-dev/app/config # the whole config.yml (terraform/modules/stack/elasticache.tf)

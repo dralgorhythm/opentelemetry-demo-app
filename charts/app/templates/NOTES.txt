@@ -1,0 +1,19 @@
+{{ .Release.Name }} deployed — chart {{ .Chart.Name }}-{{ .Chart.Version }}, image tag {{ .Values.image.tag | default .Chart.AppVersion }}.
+
+{{- if .Values.ingress.enabled }}
+
+The Ingress becomes an ALB (2-4 min on first install). Find and smoke it:
+
+  HOST=$(kubectl get ingress {{ .Release.Name }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+  curl http://$HOST{{ .Values.probePath }}
+{{- else }}
+
+ingress.enabled=false — ClusterIP only, reachable in-cluster as:
+  http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+
+NetworkPolicy is on ({{ if .Values.networkPolicy.allowFromApp }}ingress only from app={{ .Values.networkPolicy.allowFromApp }}{{ else }}default-deny{{ end }}).
+Enforcement requires the network policy controller (deploy/cluster/) — verify
+with the negative test, not by reading the policy.
+{{- end }}

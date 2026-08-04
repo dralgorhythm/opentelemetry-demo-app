@@ -1,0 +1,138 @@
+# The ADOT collector: OTLP in (from every traced service), X-Ray out.
+# Cluster infrastructure, not a product service — so it lives here as raw
+# YAML, not a chart release; its IAM identity comes from
+# terraform/modules/stack/otel.tf via Pod Identity on the SA below (which is
+# why namespace + SA name here must match that association: default /
+# otel-collector).
+#
+# Two replicas + PDB + spread: on a churning data plane (Auto Mode
+# consolidation, node upgrades), a single collector drops spans at every
+# reclaim of its node — and this demo's traces are its evidence. Same
+# resilience floor as the roster; a daemonset or gateway tier is the
+# at-scale answer.
+# No NetworkPolicy on purpose: every namespace sends spans here.
+#
+# Trace IDs: the Rust OTel SDK generates W3C random trace IDs, and X-Ray
+# accepts them natively (w3c-random-trace-id support, GA Oct 2023; ADOT
+# collector >= v0.34 — this pin is v0.49.0), so no custom X-Ray ID generator
+# is needed app-side. Fallback if that ever regresses: swap the awsxray
+# exporter for otlphttp against the CloudWatch OTLP endpoint.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector # Pod Identity association names this exact SA
+  labels: { app: otel-collector }
+---
+# Config edits do NOT restart the Deployment (plain kubectl apply, no
+# checksum annotation) — follow a config change with a rollout restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  labels: { app: otel-collector }
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          # Both wire protocols: the Rust app exports OTLP gRPC (4317);
+          # http (4318) stays for anything speaking OTLP/HTTP.
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch: {}
+    exporters:
+      awsxray:
+        region: us-east-1
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [awsxray]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  replicas: 2 # resilience floor — see header
+  selector:
+    matchLabels: { app: otel-collector }
+  template:
+    metadata:
+      labels: { app: otel-collector }
+    spec:
+      serviceAccountName: otel-collector
+      # Same placement diversity as the chart (deployment.yaml): two replicas
+      # on one node would make the PDB below theater — one reclaim, no
+      # collector. Node spread HARD, zone spread SOFT.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: otel-collector }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: otel-collector }
+      securityContext:
+        runAsNonRoot: true
+        # The ADOT image declares USER by NAME (aoc); runAsNonRoot needs a
+        # NUMERIC uid to verify, else CreateContainerConfigError.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: collector
+          # Pinned: collector upgrades should be deliberate, not every deploy.
+          image: public.ecr.aws/aws-observability/aws-otel-collector:v0.49.0
+          args: ["--config=/etc/otel/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          volumeMounts:
+            - { name: config, mountPath: /etc/otel, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: config
+          configMap: { name: otel-collector-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  type: ClusterIP
+  selector: { app: otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
+---
+# Caps VOLUNTARY disruption (drains, consolidation): evictions go one pod at
+# a time, so a node roll always leaves one collector receiving spans. Raw
+# YAML twin of the chart's pdb.yaml — the collector is cluster
+# infrastructure, not a chart release.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: otel-collector }

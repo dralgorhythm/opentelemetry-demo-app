@@ -1,0 +1,7 @@
+# Environment-qualified values for STAGING — see deploy/envs/dev.yaml for
+# the mechanism (last -f in every cloud helm loop; env-name keys only).
+# SCAFFOLD: the staging environment is never applied today (bootstrap's env
+# map is dev-only) — this file exists so promotion is a values diff, not a
+# structure change.
+secrets:
+  name: otel-demo-app-staging/app/config

@@ -1,0 +1,29 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    # ip mode targets pod IPs directly (VPC CNI) — required with a ClusterIP
+    # Service; the default (instance) needs NodePort. scheme is NOT set here:
+    # under Auto Mode it belongs in IngressClassParams (see ingressclass.yaml).
+    # No healthcheck-path annotation: the ALB's default check is GET /, which
+    # this app 200s (the greeting + counter). Note "/" touches Redis, so a
+    # Redis outage flips ALB targets unhealthy — the honest degradation for
+    # a service whose one page IS the Redis round-trip. A service without a
+    # real "/" must set alb.ingress.kubernetes.io/healthcheck-path.
+    alb.ingress.kubernetes.io/target-type: ip
+spec:
+  ingressClassName: {{ .Values.ingress.className }} # declared in ingressclass.yaml; Auto Mode reifies it as an ALB
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}
+                port: { number: 80 }
+{{- end }}

@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # Only when the HPA is off: with autoscaling on, the HPA owns the count and
+  # a hardcoded replicas here would reset it on every helm upgrade.
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "app.labels" . | nindent 8 }}
+    spec:
+      # No terminationGracePeriodSeconds: the k8s default 30s is ample — the
+      # app's shutdown work is the OTel provider flush after axum returns,
+      # well inside the window.
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Release.Name }} # Pod Identity binds the IAM role to this SA
+      {{- end }}
+      {{- /* `with` no-ops on nil/absent/empty, so a whole-key null in a later
+      -f overlay removes the pin. The two keys differ in WHY null is needed:
+      nodeSelector is a MAP (helm deep-merges maps, so {} would NOT clear
+      it); tolerations is a LIST (replaced wholesale) and uses null for the
+      one uniform "null = delete" idiom. */}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      # Placement diversity — the PDB serializes drains, but only spread
+      # protects against a node CRASH taking every replica at once.
+      topologySpreadConstraints:
+        # Across nodes: HARD. A pod that can't co-locate is itself the signal
+        # that makes Karpenter provision the second node.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "app.selectorLabels" . | nindent 14 }}
+        # Across AZs: SOFT. Hard zone spread can wedge scheduling when subnets
+        # or capacity are constrained; prefer it, don't die on it.
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "app.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      # Pod hardening — free, and expected by any security review. Hardcoded
+      # on purpose: security posture is not a per-service knob. No runAsUser
+      # needed: Chainguard bases declare a NUMERIC uid, so runAsNonRoot can
+      # verify (contrast the collector manifest, which must pin one).
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- with .Values.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          {{- if or .Values.env (and .Values.secrets.enabled .Values.secrets.sync.enabled) }}
+          env:
+            {{- range $name, $value := .Values.env }}
+            {{- if not (eq $value nil) }} {{- /* a null in a later -f overlay means "remove this key"; Helm keeps the nil in multi-file merges, so the skip lives here */}}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.secrets.enabled .Values.secrets.sync.enabled }}
+            - name: {{ .Values.secrets.sync.envVar }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secret # materialized by the driver's sync
+                  key: value
+            {{- end }}
+          {{- end }}
+          # Probes hit a dependency-free path so rollouts shift traffic cleanly.
+          # Liveness == readiness is safe ONLY because of that: a liveness
+          # probe that checked dependencies (here: Redis) would restart pods
+          # for a peer's outage. No startupProbe — a small static binary
+          # serves in milliseconds.
+          readinessProbe: { httpGet: { path: {{ .Values.probePath }}, port: http } }
+          livenessProbe: { httpGet: { path: {{ .Values.probePath }}, port: http } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          {{- if .Values.secrets.enabled }}
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          {{- end }}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.secrets.enabled }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Release.Name }}
+      {{- end }}
