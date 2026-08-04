@@ -943,6 +943,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "redis",
+ "rustls",
  "serde",
  "serde_yaml",
  "tokio",

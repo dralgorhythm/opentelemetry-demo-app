@@ -10,6 +10,13 @@ axum = "0.8.4"
 # bb8-redis re-exports (the code imports via bb8_redis::redis) and turns on
 # rustls, which rediss:// URLs (ElastiCache in-transit encryption) require.
 redis = { version = "0.27.6", features = ["tokio-rustls-comp"] }
+# redis-rs declares rustls with default-features = false and re-enables only
+# std+ring — TLS 1.2 support is silently compiled OUT, so the client sends
+# TLS 1.3-only hellos. This ElastiCache config negotiates TLS 1.2 only and
+# closes 1.3-only handshakes ("tls handshake eof"). Unify the tls12 feature
+# back in (default-features off so aws-lc-rs stays out — two crypto providers
+# make rustls's builder panic).
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
 bb8-redis = "0.18"
 tracing = "0.1.41"
 tracing-opentelemetry = "0.31.0"
