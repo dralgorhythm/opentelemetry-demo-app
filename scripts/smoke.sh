@@ -94,23 +94,30 @@ case "$mode" in
       bad "visitor counter not monotonic (got '$n1' then '$n2')"
     fi
     # Trace gate — the pipeline the whole demo exists to prove
-    # (app -> ADOT -> X-Ray) gets an enforced assert, not an info line. The
-    # greeting hits above generated spans; X-Ray ingestion lags ~10-30s, so
-    # poll every 15s for up to 90s for >=1 trace from service "app"
-    # (OTEL_SERVICE_NAME, deploy/services/app.yaml) inside this run's window.
+    # (app -> ADOT -> X-Ray) gets an enforced assert, not an info line.
+    # LEARNED LIVE (first run of this gate): the awsxray exporter names X-Ray
+    # service nodes from the local-root SPAN name ("GET /"), not the OTel
+    # resource service.name — service("app") matched zero traces while ~500
+    # were flowing. So instead of filtering by service, this asserts OUR OWN
+    # request: hit a unique marker path (a traced 404 — the middleware traces
+    # every request) and poll for a trace whose http.url contains the marker.
+    # Stronger than service-presence: proves THIS run's request traversed
+    # app -> ADOT -> X-Ray. Ingestion lags ~10-30s; poll 15s x7 (~90s+).
+    marker="smoke-${GITHUB_RUN_ID:-local}-$smoke_start"
+    curl -sf -m 10 -o /dev/null "http://$HOST/$marker" || true # 404 expected; span still emitted
     traces=0
     for attempt in $(seq 1 7); do
       traces=$(aws xray get-trace-summaries --region "$AWS_REGION" \
             --start-time "$smoke_start" --end-time "$(date +%s)" \
-            --filter-expression 'service("app")' \
+            --filter-expression "http.url CONTAINS \"$marker\"" \
             --query 'length(TraceSummaries)' --output text 2>/dev/null || echo 0)
       [[ "$traces" =~ ^[0-9]+$ && "$traces" -ge 1 ]] && break
       [[ "$attempt" -lt 7 ]] && sleep 15
     done
     if [[ "$traces" =~ ^[0-9]+$ && "$traces" -ge 1 ]]; then
-      ok "X-Ray has traces from service 'app' in the smoke window ($traces — app -> ADOT -> X-Ray)"
+      ok "X-Ray indexed this run's marker trace /$marker (app -> ADOT -> X-Ray delivering)"
     else
-      bad "no X-Ray trace from service 'app' within 90s — the app -> ADOT -> X-Ray pipeline is not delivering"
+      bad "no X-Ray trace for marker /$marker within ~90s — the app -> ADOT -> X-Ray pipeline is not delivering"
     fi
     ;;
   *)
