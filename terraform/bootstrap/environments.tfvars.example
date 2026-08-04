@@ -1,8 +1,24 @@
 # Multi-env opt-in: copy to environments.tfvars (gitignored) and re-apply
 # bootstrap locally —
 #   terraform -chdir=terraform/bootstrap apply -var-file=environments.tfvars
-# then feed the new role ARNs to GitHub (docs/bootstrap.md step 3).
-# Solo-account mode needs none of this: the variable defaults to dev only.
+# then create each GitHub Environment and feed it that env's role ARN
+# (docs/bootstrap.md "Adding an environment"). Solo-account mode needs none
+# of this: the variable defaults to dev only.
+#
+# This map is the ONLY place the environment list is enumerated. Everything
+# downstream is derived: the bounded CI role, the boundary policy (including
+# each env's sibling denies), the per-env budget, the state-key wall — and,
+# outside Terraform, promote.yml/destroy.yml take the env as a plain string
+# and validate it against terraform/envs/<env>/. Adding env #4 is an entry
+# here plus its env root and values file; no workflow is edited.
+#
+# trust_main_ref stays FALSE for every gated env: dev alone is deployed
+# straight from main by ci.yml, and a gated env whose role also trusted the
+# bare main ref could be applied by a job that never passed its approval.
+#
+# Each RUNNING env is its own VPC + NAT + EKS control plane + nodes + ALB +
+# ElastiCache. budget_usd is a tripwire, not a cap — size it for the posture
+# you intend (an ephemeral promote-drill env is not a month of uptime).
 environments = {
   dev     = { budget_usd = 25, trust_main_ref = true }
   staging = { budget_usd = 15 }

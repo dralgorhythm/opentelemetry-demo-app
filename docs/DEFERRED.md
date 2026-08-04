@@ -35,12 +35,22 @@ forks already chosen.
 
 ## Multi-environment
 
-- **Promotion to staging/prod.** The roots, CIDR plan, and state keys exist;
-  the roles don't. First step: add the envs to
-  `terraform/bootstrap/environments.tfvars`, re-apply bootstrap locally,
-  create protected GitHub environments, then a `promote.yml` that deploys the
-  **same immutable image SHA** dev smoked — build once, promote by digest
-  (the shared ECR was account-scoped for exactly this).
+- ~~**Promotion to staging/prod.**~~ Landed: `promote.yml` deploys the same
+  immutable image SHA dev smoked, to any environment with a
+  `terraform/envs/<env>` root. The remaining work is *operational*, not
+  code — the bootstrap re-apply and the protected GitHub Environments are
+  manual by design (see `docs/bootstrap.md` § Adding an environment).
+- **A build stamp (`EXPECT_SHA`).** `promote.yml` can prove the target
+  environment is healthy but not that the *promoted SHA* is the one serving
+  — the app self-reports no build, so `helm --wait --atomic` is the only
+  thing backing that claim. First step: a build-arg SHA surfaced in the
+  greeting or a `/version` route, then `EXPECT_SHA=$SHA scripts/smoke.sh
+  cloud` in both deploy gates. Tracked with `service.version`.
+- **Prod posture.** `terraform/envs/prod` is configuration-identical to
+  staging today. The prod-specific upgrades (per-AZ NAT via
+  `single_nat_gateway = false`, tighter alarm thresholds, ACM certs +
+  HTTPS, Redis HA) are each one line in that root when a real audience
+  arrives — promoting to prod now gets you a *staging-grade* prod.
 - **PR preview environments.** Ephemeral `pr-*` namespaces with their own
   bounded OIDC role. First step: a preview role in bootstrap plus a
   PR-triggered deploy/teardown pair keyed on the PR number.

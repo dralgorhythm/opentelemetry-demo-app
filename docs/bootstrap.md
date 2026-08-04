@@ -137,13 +137,100 @@ Nothing else runs locally. Later PRs bring the pipeline alive:
 - The shared ECR stack (`otel-demo-app/*` repositories — single service
   `app` for now) applies **via CI** using `otel-demo-app-ci-shared` once its
   PR lands.
-- Opting into staging/prod later: copy
-  `terraform/bootstrap/environments.tfvars.example` to
-  `environments.tfvars`, re-apply this stack locally, feed the new role
-  ARNs to the matching GitHub Environments.
+- Opting into staging/prod (or any further environment): the runbook below.
 
 Re-applying this stack is always local, with your own credentials — never
 from CI.
+
+## 6 · Adding an environment
+
+Dev is continuously deployed from `main` by `ci.yml`. Every *other*
+environment is deployed by `promote.yml` — build once, promote many: it
+never builds, it deploys an image SHA the dev pipeline already smoked, and
+it applies that env's Terraform on the way in (so the same button is the
+cold bring-up).
+
+`promote.yml` and `destroy.yml` take the environment as a **plain string**
+and validate it against the repo, so nothing below is a workflow edit.
+Adding `staging` and `prod` — or a fourth environment — is these four steps.
+
+**a. Repo: the env root and its values file.** Already present for
+`staging` and `prod`. For a new one, copy an existing root and change three
+things — the backend `key`, the `environment` default in `variables.tf`,
+and the `vpc_cidr` (dev `10.0`, staging `10.1`, prod `10.2` → take the next
+free `/16`; overlapping CIDRs are the one mistake this layout can't catch
+for you):
+
+```bash
+cp -r terraform/envs/staging terraform/envs/<env>   # then edit those three
+cp deploy/envs/staging.yaml  deploy/envs/<env>.yaml # then edit the secret name
+```
+
+The values file must name `otel-demo-app-<env>/app/config` — matching
+`local.name` in the stack module. The `gates` job in `ci.yml` renders every
+`deploy/envs/*.yaml` and asserts exactly that, so a typo here fails at PR
+time rather than during an approval window.
+
+**b. AWS: the bounded role.** Add the env to the map and re-apply *locally*
+— this is the only stack that ever applies from a laptop:
+
+```bash
+cp terraform/bootstrap/environments.tfvars.example terraform/bootstrap/environments.tfvars
+# edit the map: keep dev's trust_main_ref = true, leave gated envs without it
+terraform -chdir=terraform/bootstrap apply -var-file=environments.tfvars
+```
+
+Adding an env is **additive** — the roles are already `for_each`'d over this
+map, so there are no renames or replaces. One in-place change is expected
+and intended: each existing env's boundary policy gains the new env's
+sibling denies (state keys, `otel-demo-app-<new>/*` secrets, log groups,
+dashboards). Dev's credential gets *stricter*, which is the wall working.
+
+**c. GitHub: the protected environment.** This is the approval gate, and it
+is also what makes the OIDC sub `environment:<env>` — the only sub that env's
+role trusts. One required reviewer plus a main-only branch policy:
+
+```bash
+REPO=dralgorhythm/opentelemetry-demo-app
+OWNER_ID=$(gh api user -q .id)
+for e in staging prod; do
+  gh api -X PUT "repos/$REPO/environments/$e" --input - <<EOF
+{"reviewers":[{"type":"User","id":$OWNER_ID}],
+ "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+EOF
+  gh api -X POST "repos/$REPO/environments/$e/deployment-branch-policies" -f name=main
+  gh variable set CI_ROLE_ARN --env "$e" -R "$REPO" \
+    --body "$(terraform -chdir=terraform/bootstrap output -json ci_role_arns | jq -r ".$e")"
+done
+```
+
+Approving your own dispatch is the intended solo flow — leave "prevent
+self-review" off. The **environment-scoped** `CI_ROLE_ARN` shadows the
+repo-level one (which stays dev's), which is how one `vars.CI_ROLE_ARN`
+reference in a workflow resolves per environment. Forget it and the job
+assumes dev's role, whose boundary denies the whole apply: noisy, but it
+fails closed. `AWS_ACCOUNT_ID` / `AWS_REGION` / `ADMIN_PRINCIPAL_ARN` /
+`ALERT_EMAIL` fall back to repo level, which is correct for one account in
+one region.
+
+The same fork gotcha as step 3 applies — pass `-R <owner>/<repo>` explicitly.
+
+**d. Promote.** Actions → **promote** → environment `staging`, version
+empty (= this ref's HEAD) or a `vX.Y.Z` tag or a full 40-char SHA. The
+`resolve` job posts the service→digest manifest to the run summary *before*
+the approval prompt, so you approve a specific artifact. First apply into a
+cold environment is the long one (~15–20 min for VPC + EKS); the deploy job
+then gates on `scripts/smoke.sh cloud` against that env's own ALB and
+ElastiCache.
+
+Tear down the same way: Actions → **destroy** → type `destroy`, name the
+environment.
+
+> **Cost.** Each *running* environment is its own VPC + NAT + EKS control
+> plane + nodes + ALB + ElastiCache — this is not a namespace, it is a
+> parallel stack. The per-env `budget_usd` is a tripwire, not a ceiling.
+> Assume the ephemeral posture (promote → drill → destroy) unless you mean
+> to pay for uptime.
 
 Why things are the way they are: [DECISIONS.md](./DECISIONS.md) · what's
 deliberately not built yet: [DEFERRED.md](./DEFERRED.md).

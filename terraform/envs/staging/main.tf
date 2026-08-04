@@ -1,9 +1,10 @@
-# The STAGING environment root — SCAFFOLDING ONLY, never applied. The
-# bootstrap environments map is dev-only today (terraform/bootstrap
-# environments.tf), so the bounded staging CI role and boundary policy this
-# root assumes DO NOT EXIST yet; opting in = re-apply bootstrap with a
-# staging entry in -var-file=environments.tfvars, then wire a promote
-# workflow at this directory. An unapplied env root costs $0.
+# The STAGING environment root — reachable, but only after opt-in. This root
+# is applied by `promote.yml` with environment=staging, which requires (a) a
+# `staging` entry in terraform/bootstrap/environments.tfvars, applied
+# locally, so the bounded staging CI role + boundary policy this root assumes
+# exist, and (b) a protected GitHub Environment `staging` carrying that role
+# ARN. Without both, promote fails closed at role assumption. Until then this
+# root costs $0. Runbook: docs/bootstrap.md "Adding an environment".
 #
 # See envs/dev/main.tf for the pattern ("directories, not workspaces").
 # What differs from dev is exactly what's visible here: the state key, the

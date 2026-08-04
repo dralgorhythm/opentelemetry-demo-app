@@ -1,8 +1,10 @@
-# The PROD environment root — SCAFFOLDING ONLY, never applied. Like staging,
-# its bounded CI role and boundary policy DO NOT EXIST yet (the bootstrap
-# environments map is dev-only — terraform/bootstrap environments.tf);
-# opting in = re-apply bootstrap with a prod entry, then wire a promote
-# workflow at this directory. An unapplied env root costs $0.
+# The PROD environment root — reachable, but only after opt-in. This root is
+# applied by `promote.yml` with environment=prod, which requires (a) a `prod`
+# entry in terraform/bootstrap/environments.tfvars, applied locally, so the
+# bounded prod CI role + boundary policy exist, and (b) a protected GitHub
+# Environment `prod` carrying that role ARN. Without both, promote fails
+# closed at role assumption. Until then this root costs $0.
+# Runbook: docs/bootstrap.md "Adding an environment".
 #
 # See envs/dev/main.tf for the pattern ("directories, not workspaces") and
 # envs/staging/main.tf for the multi-env notes. Prod today is
