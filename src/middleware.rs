@@ -65,6 +65,14 @@ pub fn create_trace_layer() -> TraceLayer<
                 // Query string (Conditionally Required)
                 "url.query" = Empty,
 
+                // Full URL (Opt-in). Current semconv, and the ONLY source of
+                // the host for X-Ray: the collector renames this to the
+                // old-convention http.url that the awsxray exporter reads
+                // (deploy/cluster/otel-collector.yaml). Without it segments
+                // carry "http:///path" — host-less, so no X-Ray URL filter
+                // can tell environments apart.
+                "url.full" = Empty,
+
                 // Server information (Recommended)
                 "server.address" = Empty,
                 "server.port" = Empty,
@@ -116,6 +124,20 @@ pub fn create_trace_layer() -> TraceLayer<
                 span.record("user_agent.original", ua);
             }
 
+            // url.full = scheme://host/path[?query]. Built from the Host
+            // header, so it reflects the edge the client actually addressed
+            // (the ALB hostname), which is exactly what makes it useful for
+            // telling dev from staging in an X-Ray URL filter. Skipped
+            // entirely when there is no Host header — a synthesized URL that
+            // claims a host nobody sent would be worse than an absent one.
+            if let Some(host) = host_header {
+                let full = match query {
+                    Some(q) => format!("{scheme}://{host}{path}?{q}"),
+                    None => format!("{scheme}://{host}{path}"),
+                };
+                span.record("url.full", full.as_str());
+            }
+
             // Set HTTP version
             let version = match request.version() {
                 http::Version::HTTP_09 => "0.9",
@@ -136,8 +158,34 @@ pub fn create_trace_layer() -> TraceLayer<
                 span.record("http.request.body.size", content_length);
             }
 
-            // Set the OpenTelemetry span name (method + path for servers)
-            let span_name = format!("{} {}", method, path);
+            // Span name = method + ROUTE TEMPLATE, never the concrete path.
+            //
+            // This is OTel's own rule for server spans, and here it is also a
+            // load-bearing X-Ray fix: the awsxray exporter labels service-map
+            // nodes from the local-root span name, so a name carrying the raw
+            // path minted ONE NODE PER URL. Observed live as segments named
+            // `GET /smoke-30958213453-1785884357` — every smoke run, every
+            // scanner probe, its own permanent node. It is also why
+            // `service("app")` matched zero traces and PR #17's trace gate had
+            // to filter on http.url instead.
+            //
+            // MatchedPath is the router's template (`/` stays `/`; a future
+            // `/users/{id}` stays `/users/{id}` rather than exploding per id).
+            // Absent when nothing matched — 404s, which are exactly the
+            // unbounded case — and OTel says to use the bare method there
+            // rather than invent a template.
+            let span_name = match request.extensions().get::<axum::extract::MatchedPath>() {
+                Some(matched) => {
+                    // http.route was declared on the span and never recorded.
+                    // Populating it is what makes the X-Ray annotation of the
+                    // same name (otel-collector.yaml indexed_attributes) hold
+                    // anything — and it is the low-cardinality key you want to
+                    // filter by, unlike the concrete url.path.
+                    span.record("http.route", matched.as_str());
+                    format!("{} {}", method, matched.as_str())
+                }
+                None => method.to_string(),
+            };
             span.record("otel.name", &span_name);
 
             // Adopt the CALLER's trace, if it sent one. The global
@@ -162,8 +210,18 @@ pub fn create_trace_layer() -> TraceLayer<
         })
         .on_response(
             |response: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
-                // Record response status code
-                span.record("http.response.status_code", response.status().as_u16());
+                // `as i64` is load-bearing, exactly like the latency_ms cast
+                // below. tracing records u16 as u64, and tracing-opentelemetry
+                // has no unsigned OTel attribute type to map that onto, so it
+                // STRINGIFIES: the span carried Str("200"). X-Ray's
+                // http.status_code must be an integer, so a string left every
+                // segment at status 0 — no error classification, no service-map
+                // error rate, `http.status = 500` matching nothing. i64 maps
+                // to OTel Int and survives the whole path.
+                span.record(
+                    "http.response.status_code",
+                    response.status().as_u16() as i64,
+                );
 
                 // Record response content length if available
                 if let Some(content_length) = response
