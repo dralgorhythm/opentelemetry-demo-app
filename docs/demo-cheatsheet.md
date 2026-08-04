@@ -34,7 +34,10 @@ curl -s http://$HOST/; echo; curl -s http://$HOST/
 # Generate trace/load volume for the observability demo
 for i in $(seq 1 50); do curl -s -o /dev/null http://$HOST/; done
 
-# Or just run the CI deploy gate — all checks incl. counter monotonicity + X-Ray count
+# Or just run the CI deploy gate — five checks: healthz + greeting through the
+# ALB + counter monotonicity (ElastiCache TLS+AUTH) + this run's own marker
+# trace indexed in X-Ray within ~90s (app→ADOT→X-Ray) + the served-build
+# assert when EXPECT_SHA is set
 scripts/smoke.sh cloud
 ```
 
@@ -118,9 +121,9 @@ aws logs tail /aws/containerinsights/$CLUSTER/application --follow --filter-patt
 aws logs tail /aws/containerinsights/$CLUSTER/application --since 15m --filter-pattern ERROR
 ```
 
-Logs Insights — saved queries exist in the console under
-`otel-demo-app-dev/…` (`p95-by-service`, `errors-recent`,
-`volume-by-service`); ad hoc:
+Logs Insights — saved queries exist in the console:
+`otel-demo-app-dev/p95-by-service`, `otel-demo-app-dev/errors-recent`,
+`otel-demo-app-dev/volume-by-service`; ad hoc:
 
 ```bash
 qid=$(aws logs start-query --log-group-name /aws/containerinsights/$CLUSTER/application \
@@ -149,6 +152,14 @@ gh repo set-default dralgorhythm/opentelemetry-demo-app   # fork gotcha: gh othe
 gh run list --workflow ci.yml --limit 5
 gh run watch                                              # live-follow the current run
 gh workflow run ci.yml                                    # full pipeline: gates → infra → deploy → smoke
+
+# Promotion (gated envs — never dev): version empty = this ref's HEAD,
+# or a vX.Y.Z tag, or a full 40-char SHA
+gh workflow run promote.yml -f environment=staging -f version=v1.2.3
+gh workflow run promote.yml -f environment=staging      # promote HEAD
+# The resolve job posts the service→digest manifest to the run summary
+# BEFORE the approval prompt — approve a specific artifact, not a hope
+
 # Teardown is Actions → destroy (type "destroy") — Helm uninstall waits for the ALB before terraform destroy
 ```
 
@@ -167,7 +178,7 @@ terraform state list | head -30
 docker compose up -d                # Redis + Jaeger (UI: http://localhost:16686)
 cargo run -- -f config.yml          # serves http://127.0.0.1:8080
 curl -s http://127.0.0.1:8080/      # then look at the trace in Jaeger
-cargo fmt --check && cargo clippy && cargo test           # the CI gates, locally
+cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked   # the CI gates, locally
 docker build --platform linux/amd64 .                     # the musl-static chainguard image
 ```
 
@@ -177,8 +188,9 @@ docker build --platform linux/amd64 .                     # the musl-static chai
   returns 500 with the real cause in pod logs — deliberately decoupled so a
   Redis outage never evicts pods. The wiring: `src/routes.rs` (bb8 error
   sink + preflight) and `src/handlers.rs` (dependency-free healthz).
-- **PDB in action:** `kubectl -n otel-demo drain <node>
-  --ignore-daemonsets --delete-emptydir-data` respects `maxUnavailable: 1`.
+- **PDB in action:** `kubectl drain <node> --ignore-daemonsets
+  --delete-emptydir-data` respects `maxUnavailable: 1` (drain is
+  cluster-scoped, not namespaced; get node names via `kubectl get nodes`).
 - **Secret rotation model:** rotate the Secrets Manager value, then
   `rollout restart` — config is read once at boot, so restart *is* the
   rotation mechanism.

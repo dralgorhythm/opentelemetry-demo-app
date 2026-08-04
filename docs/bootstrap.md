@@ -73,8 +73,10 @@ terraform -chdir=terraform/bootstrap apply \
   -var alert_email=<you@example.com>   # optional: creates the monthly budgets; omit to skip
 ```
 
-Budget notes (only if you passed `alert_email`): account ceiling $50/mo,
-per-env $25/mo, alerts at 50%/90% actual + 100% forecast. The per-env
+Budget notes (only if you passed `alert_email`): account ceiling $200/mo
+(the `monthly_budget_usd` variable), per-env default $150/mo (override
+per env via `budget_usd` in the `environments` map), alerts at 50%/90%
+actual + 100% forecast. The per-env
 budgets filter on the `Environment` cost-allocation tag — activate it once
 (`aws ce update-cost-allocation-tags-status --cost-allocation-tags-status
 TagKey=Environment,Status=Active`) and allow ~24h; until then they
