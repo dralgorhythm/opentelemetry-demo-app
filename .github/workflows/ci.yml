@@ -64,7 +64,7 @@ jobs:
     permissions: { id-token: write, contents: read }
     env:
       # Mirror the infra job's TF_VARs or the PR plan diverges from the apply.
-      TF_VAR_admin_principal_arn: "arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:user/admin"
+      TF_VAR_admin_principal_arn: "${{ vars.ADMIN_PRINCIPAL_ARN }}"
       TF_VAR_alert_email: "${{ vars.ALERT_EMAIL }}" # unset variable = empty = alerting stays unsubscribed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,8 +123,13 @@ jobs:
     concurrency: { group: env-dev, cancel-in-progress: false }
     env:
       # Humans need their own access entry: the creator-admin entry goes to the
-      # APPLIER of this Terraform, which is the CI role — not you.
-      TF_VAR_admin_principal_arn: "arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:user/admin"
+      # APPLIER of this Terraform, which is the CI role — not you. Set the
+      # ADMIN_PRINCIPAL_ARN repo variable to your human principal's IAM ARN —
+      # for Identity Center that's the underlying role WITH its path, e.g.
+      # arn:aws:iam::<acct>:role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_...
+      # (NOT the sts assumed-role ARN). Empty = no human access entry.
+      # Caveat: the suffix changes if the permission set is reprovisioned.
+      TF_VAR_admin_principal_arn: "${{ vars.ADMIN_PRINCIPAL_ARN }}"
       # The ALB-alarm email (terraform/modules/stack/alerting.tf). CI is the
       # ONLY applier of this stack, so without this mapping the subscription
       # is unreachable: set it via `gh variable set ALERT_EMAIL`.
