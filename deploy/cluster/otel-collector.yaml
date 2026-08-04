@@ -55,6 +55,49 @@ data:
         check_interval: 1s
         limit_mib: 100
         spike_limit_mib: 25
+      # X-Ray speaks the OLD OpenTelemetry HTTP conventions. The app emits the
+      # CURRENT ones, correctly, so the translation belongs HERE — next to the
+      # vendor exporter that needs it — rather than polluting the app with
+      # deprecated attribute names. Nothing else in the pipeline is X-Ray
+      # specific; this processor is, and it sits directly in front of it.
+      #
+      # Coverage is PARTIAL upstream, which is what made this hard to see:
+      # http.request.method and user_agent.original already translate, and
+      # url.scheme/url.path partly do (segments arrived as "http:///path" —
+      # right path, missing host). Two things did not, and both matter:
+      #
+      #  http.status_code — WITHOUT IT EVERY SEGMENT ARRIVES AS status 0.
+      #    X-Ray derives its error/fault/throttle classification from status,
+      #    so the service map showed zero errors no matter what the app
+      #    returned, and `http.status = 500` filters matched nothing. This is
+      #    the single highest-impact line in this file.
+      #
+      #  http.url — the full URL, renamed from the app's `url.full`. Without
+      #    it segments carried "http:///path": right path, no host, so X-Ray
+      #    URL filters could never match a hostname or distinguish an
+      #    environment.
+      #
+      # A span missing either source attribute simply passes through
+      # untouched — `from_attribute` is a no-op when the source is absent, so
+      # there is no shape of span this can drop.
+      #
+      # NOT the `transform` processor: ADOT does not bundle it. Verified by
+      # running the real image — v0.49.0 AND :latest (which currently IS
+      # v0.49.0) both reject it with `unknown type: "transform"`. This is a
+      # curated component set, not a version lag, so upgrading does not help.
+      # `attributes` is bundled and does everything needed here, because both
+      # fixes are pure RENAMES — which is also why the app can keep emitting
+      # only current semantic conventions.
+      attributes/xray:
+        actions:
+          # insert, not upsert: if a future app or SDK already emits the old
+          # key correctly, its value wins rather than being overwritten.
+          - key: http.status_code
+            from_attribute: http.response.status_code
+            action: insert
+          - key: http.url
+            from_attribute: url.full
+            action: insert
       batch: {}
     exporters:
       awsxray:
@@ -62,12 +105,30 @@ data:
         # wire derives from vars.AWS_REGION/the provider. Change this on a
         # region move (nothing gates it).
         region: us-east-1
+        # X-Ray only INDEXES annotations. Everything else lands in metadata,
+        # which is visible on a trace you already found but unusable as a
+        # filter — which is why segments showed `annotations: None` and no
+        # filter expression could select on anything the app knows.
+        #
+        # Deliberately short: annotations are a hard cap of 50 per trace and
+        # every one is indexed storage. These three are the questions actually
+        # asked in an incident — which build, which route, what status — and
+        # all three are LOW CARDINALITY. url.path is the concrete path and is
+        # NOT here on purpose: indexing an unbounded key is how you turn an
+        # index into a bill.
+        indexed_attributes:
+          - service.version
+          - http.status_code
+          - http.route
     service:
       extensions: [health_check]
       pipelines:
         traces:
+          # Order is deliberate: memory_limiter FIRST (backpressure before
+          # anything else does work), attributes before batch so the rename
+          # happens per-span rather than on assembled batches, awsxray last.
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, attributes/xray, batch]
           exporters: [awsxray]
 ---
 apiVersion: apps/v1
