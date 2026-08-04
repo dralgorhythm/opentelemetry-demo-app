@@ -13,19 +13,37 @@ on:
         description: 'Type "destroy" to confirm tearing down the chosen environment'
         required: true
       environment:
-        description: "Environment to tear down"
-        type: choice
-        options: [dev] # staging/prod roots are inert scaffolding — no roles, no state
+        description: "Environment to tear down (any env with a terraform/envs/<env> root)"
+        type: string
+        required: true
         default: dev
 
 permissions:
   contents: read
 
 jobs:
+  # Runs WITHOUT `environment:` so a typo can never mint one: GitHub
+  # auto-creates an unprotected environment for any name a running job
+  # references, and an unprotected environment is a missing approval gate.
+  # Cheap (checkout + two greps) and the destroy job `needs:` it.
+  validate:
+    if: vars.AWS_ACCOUNT_ID != '' && inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    env: { ENVIRONMENT: "${{ inputs.environment }}" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate the target environment
+        run: |
+          echo "$ENVIRONMENT" | grep -qE '^[a-z][a-z0-9-]{0,20}$' \
+            || { echo "::error::'$ENVIRONMENT' is not a valid environment name (^[a-z][a-z0-9-]{0,20}$)"; exit 1; }
+          [ -d "terraform/envs/$ENVIRONMENT" ] \
+            || { echo "::error::no terraform/envs/$ENVIRONMENT — nothing to destroy"; exit 1; }
+
   destroy:
     # The vars gate stays a job condition (pre-bootstrap repos skip cleanly);
     # the confirm check is a STEP below so a typo turns the run RED.
-    if: vars.AWS_ACCOUNT_ID != ''
+    needs: validate
+    if: vars.AWS_ACCOUNT_ID != '' && inputs.confirm == 'destroy'
     # Two keys per destroy: the typed confirmation above, plus the TARGET
     # environment's own protection rules (dev has none — hands-free drills).
     # Destroys ONE env's workload stack only — the CI identity lives in

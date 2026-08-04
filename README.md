@@ -5,8 +5,10 @@ since the SRE onsite assignment, the **infrastructure monorepo that runs it**:
 a secure AWS environment (EKS + observability) built entirely with Terraform,
 the app served publicly, every Kubernetes resource declarative, all applies
 owned by CI. Amendments to the original prompt: the app depends on
-**ElastiCache Redis**, and only a **dev** environment is stood up (staging/prod
-are namespaced-in scaffolding, never applied).
+**ElastiCache Redis**, and only **dev** is stood up by default — staging,
+prod, and any further environment are one opt-in away
+([runbook](docs/bootstrap.md#6--adding-an-environment)) and deploy by
+promotion, never by rebuild.
 
 Fork of the Latent-ML demo app; upstream's app docs are preserved under
 [Local development](#local-development).
@@ -57,6 +59,7 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
 | #8 | CD: deploy + release jobs, `scripts/smoke.sh` deploy gate, `destroy.yml` |
 | #9 | These docs |
 | #10–#12 | Production hardening from the first live incident: smoke-gate exec bit; real Redis error surfacing (bb8's default `NopErrorSink` had been masking every connection failure); the security-group hypothesis disproved by live test and reverted; rustls `tls12` feature restored — redis-rs had compiled TLS 1.2 out while ElastiCache negotiates only TLS 1.2 |
+| #13–#15 | Docs truth-sync; the [demo cheat sheet](docs/demo-cheatsheet.md); `promote.yml` — build-once/promote-many to any number of gated environments |
 
 ## Bring-up from zero
 
@@ -73,9 +76,27 @@ ALB alarms + dashboard live in `terraform/modules/stack/alerting.tf`.
    squash); rebase-merge would bypass bump detection — disable it in repo
    settings.
 
+## Promotion — staging, prod, and beyond
+
+Dev is continuous: merge to `main` and it deploys. Every other environment
+is a **promotion**, never a rebuild — Actions → **promote** → name the
+environment and a version (empty = this ref's HEAD, or a `vX.Y.Z` tag, or a
+full SHA). The `resolve` job posts the service→digest manifest to the run
+summary *before* the approval prompt, so the reviewer approves a specific
+artifact; the approved jobs then apply that env's Terraform (cold bring-up
+and warm no-op are the same button) and deploy the image dev already smoked.
+
+The environment is a plain string validated against `terraform/envs/<env>/`,
+so a fourth environment is a bootstrap tfvars entry, a GitHub Environment,
+an env root and a values file — **no workflow edit**. Full runbook:
+[docs/bootstrap.md § Adding an environment](docs/bootstrap.md#6--adding-an-environment).
+Each running environment is a parallel stack (VPC + NAT + EKS + ALB +
+ElastiCache), not a namespace — assume promote → drill → destroy unless you
+mean to pay for uptime.
+
 ## Teardown
 
-Actions → **destroy** → type `destroy`, pick the environment. The workflow
+Actions → **destroy** → type `destroy`, name the environment. The workflow
 uninstalls the Helm releases and waits for the Auto-Mode-owned ALB to be
 reaped *before* `terraform destroy` (the ALB isn't in Terraform state — the
 classic VPC-hang). Bootstrap identity and shared ECR deliberately survive.
