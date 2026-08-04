@@ -72,6 +72,11 @@ module "eks" {
     node_pools = ["general-purpose"]
   }
 
+  # Pure Auto Mode: nodes ride the cluster PRIMARY security group, so the
+  # module-default node SG (plus its recommended ingress/egress rules and
+  # the matching cluster-SG cross-rules) would attach to nothing — skip it.
+  create_node_security_group = false
+
   # ALTERNATIVE — Fargate (serverless pods, no nodes to patch; higher
   # per-pod cost, you install the AWS LB Controller yourself, no Pod
   # Identity — which this stack's workload identities depend on):
@@ -96,7 +101,7 @@ module "eks" {
     # (SecretProviderClass secretObjects -> native k8s Secret, for env-var
     # delivery) and rotation polling (mounted FILES update in-place on
     # rotation; env vars don't until restart). The app consumes its config
-    # secret through this driver once the ElastiCache PR lands.
+    # secret through this driver — see elasticache.tf.
     aws-secrets-store-csi-driver-provider = {
       configuration_values = jsonencode({
         secrets-store-csi-driver = {

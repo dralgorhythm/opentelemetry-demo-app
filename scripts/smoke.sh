@@ -49,6 +49,9 @@ case "$mode" in
     # it is smoking.
     CLUSTER="${CLUSTER:-otel-demo-app-dev}"
     AWS_REGION="${AWS_REGION:-us-east-1}"
+    # Trace-gate window opens HERE, before any request is made — every span
+    # this run generates falls inside [smoke_start, now].
+    smoke_start=$(date +%s)
     # Region-drift witness: say where the regional reads below actually
     # point before trusting any of them.
     echo "smoke[cloud]: target $CLUSTER/$AWS_REGION — aws-cli $(aws configure list 2>/dev/null | awk '/region/ {$1=$1; print; exit}')"
@@ -80,11 +83,25 @@ case "$mode" in
     else
       bad "visitor counter not monotonic (got '$n1' then '$n2')"
     fi
-    # Traces lag ingestion by ~10-30s — report, never fail on this.
-    n=$(aws xray get-trace-summaries --region "$AWS_REGION" \
-          --start-time "$(date -v-5M +%s 2>/dev/null || date -d '5 minutes ago' +%s)" \
-          --end-time "$(date +%s)" --query 'length(TraceSummaries)' --output text 2>/dev/null || echo "?")
-    echo "  i X-Ray traces in the last 5m: $n (info only — ADOT -> X-Ray)"
+    # Trace gate — the pipeline the whole demo exists to prove
+    # (app -> ADOT -> X-Ray) gets an enforced assert, not an info line. The
+    # greeting hits above generated spans; X-Ray ingestion lags ~10-30s, so
+    # poll every 15s for up to 90s for >=1 trace from service "app"
+    # (OTEL_SERVICE_NAME, deploy/services/app.yaml) inside this run's window.
+    traces=0
+    for attempt in $(seq 1 7); do
+      traces=$(aws xray get-trace-summaries --region "$AWS_REGION" \
+            --start-time "$smoke_start" --end-time "$(date +%s)" \
+            --filter-expression 'service("app")' \
+            --query 'length(TraceSummaries)' --output text 2>/dev/null || echo 0)
+      [[ "$traces" =~ ^[0-9]+$ && "$traces" -ge 1 ]] && break
+      [[ "$attempt" -lt 7 ]] && sleep 15
+    done
+    if [[ "$traces" =~ ^[0-9]+$ && "$traces" -ge 1 ]]; then
+      ok "X-Ray has traces from service 'app' in the smoke window ($traces — app -> ADOT -> X-Ray)"
+    else
+      bad "no X-Ray trace from service 'app' within 90s — the app -> ADOT -> X-Ray pipeline is not delivering"
+    fi
     ;;
   *)
     echo "usage: $0 cloud   (local/preview postures deferred — cloud is the only mode)"

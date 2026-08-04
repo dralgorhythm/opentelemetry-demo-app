@@ -31,13 +31,3 @@ variable "alert_email" {
   type    = string
   default = ""
 }
-
-# True because the bootstrap apply (terraform/bootstrap, run locally before
-# this stack ever plans in CI) created dev's boundary policy: every role
-# this stack creates now carries the boundary, closing the loop the
-# boundary's own RequireOwnBoundaryOnRoles statement demands. False remains
-# valid only for accounts that never ran the bootstrap.
-variable "enable_permissions_boundary" {
-  type    = bool
-  default = true
-}

@@ -32,6 +32,11 @@ metadata:
   labels: { app: otel-collector }
 data:
   config.yaml: |
+    extensions:
+      # Serves GET / on :13133 — the Deployment's readiness/liveness probes
+      # point here, so the Service only routes OTLP to a listening pod.
+      health_check:
+        endpoint: 0.0.0.0:13133
     receivers:
       otlp:
         protocols:
@@ -42,15 +47,27 @@ data:
           http:
             endpoint: 0.0.0.0:4318
     processors:
+      # Backpressure before OOM: sized under the container's 128Mi limit so
+      # a span burst refuses data (the SDK retries) instead of OOMKilling
+      # the collector and dropping everything buffered. Must run FIRST in
+      # the pipeline to protect the processors behind it.
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 100
+        spike_limit_mib: 25
       batch: {}
     exporters:
       awsxray:
+        # THE one region literal in the k8s layer — every other regional
+        # wire derives from vars.AWS_REGION/the provider. Change this on a
+        # region move (nothing gates it).
         region: us-east-1
     service:
+      extensions: [health_check]
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [awsxray]
 ---
 apiVersion: apps/v1
@@ -98,6 +115,21 @@ spec:
               containerPort: 4317
             - name: otlp-http
               containerPort: 4318
+            - name: health
+              containerPort: 13133
+          # Both probes hit the health_check extension (config above).
+          # Readiness is the tight one — it only gates Service endpoints, so
+          # a slow pod merely stops receiving; liveness restarts the
+          # container, so it gets a longer leash.
+          readinessProbe:
+            httpGet: { path: /, port: health }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4
           volumeMounts:
             - { name: config, mountPath: /etc/otel, readOnly: true }
           securityContext:

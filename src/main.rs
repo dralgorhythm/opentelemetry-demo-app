@@ -32,12 +32,18 @@ fn setup_tracing() -> Result<opentelemetry_sdk::trace::SdkTracerProvider, Box<dy
         .with_endpoint(otlp_endpoint)
         .build()?;
 
+    // service.name from OTEL_SERVICE_NAME (deploy/services/app.yaml sets
+    // "app" — the release/SA/ECR identity); crate name is the local-dev
+    // fallback.
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "opentelemetry-demo-app".to_string());
+
     // Create tracer provider
     let tracer_provider = opentelemetry_sdk::trace::TracerProviderBuilder::default()
         .with_batch_exporter(exporter)
         .with_resource(
             Resource::builder()
-                .with_attribute(KeyValue::new("service.name", "opentelemetry-demo-app"))
+                .with_attribute(KeyValue::new("service.name", service_name))
                 .build(),
         )
         .build();

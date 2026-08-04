@@ -82,8 +82,10 @@ resource "aws_elasticache_replication_group" "redis" {
 # unlike a human-owned secret, drift IS the rotation mechanism.
 #
 # Known trade, documented for the presentation: token and URL are readable
-# in this stack's TF state (encrypted bucket, access walled per state key by
-# the CI boundaries). The prod answer is a Secrets Manager rotation Lambda.
+# in this stack's TF state — and the read-only CI PLAN role can read this
+# state key from any collaborator's PR branch (its plan needs env state),
+# so the compensating control is repo membership + the fork guard, not an
+# IAM wall. The prod answer is a Secrets Manager rotation Lambda.
 resource "aws_secretsmanager_secret" "app_config" {
   name = "${local.name}/app/config"
   # Teardown means teardown (same posture as the rest of the stack); the

@@ -58,6 +58,10 @@ locals {
   # empty and these queries return nothing until the JSON formatter lands
   # (deferred) — they're wired now so log shipping and analytics arrive as
   # one story, not two migrations.
+  # KNOWN CONSTRAINT: parse '*-*' splits pod_name at the FIRST hyphen, so a
+  # hyphenated release name (the roster convention allows them) mis-buckets
+  # — pod "some-api-6d5f4c-xyz" reports svc="some". Fine at demo scale;
+  # revisit by shipping a real label when Fluent Bit label-shipping returns.
   q_logs_p95    = <<-EOT
     filter log_processed.fields.message = 'HTTP request completed'
     | parse kubernetes.pod_name '*-*' as svc, rest
@@ -168,18 +172,104 @@ resource "aws_cloudwatch_metric_alarm" "alb_target_latency" {
   ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
+# ELB-generated 5xx: failures the TARGETS never see — zero healthy targets,
+# connection timeouts, rejected connections. A total outage produces ONLY
+# this count (target 5xx needs a target to answer), so it gets its own
+# alarm rather than riding the target-5xx one. Same discovery story: the
+# shared q_elb_5xx local carries the auto-pin WHERE clause.
+resource "aws_cloudwatch_metric_alarm" "alb_elb_5xx" {
+  alarm_name          = "${local.name}-alb-elb-5xx"
+  alarm_description   = local.alb_pinned ? "ELB-generated 5xx responses on ${local.alb_arn_suffix} (auto-pinned by cluster tag) — LB-level failures, e.g. no healthy targets." : "ELB-generated 5xx responses summed across every ALB in the account (no ALB discovered to pin — see the auto-pin header)."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  threshold           = var.alb_elb_5xx_threshold
+  # Same from-zero posture as the target-5xx alarm: no ALB or no traffic
+  # means no data points, which must read GREEN.
+  treat_missing_data = "notBreaching"
+
+  metric_query {
+    id          = "q1"
+    period      = 300
+    return_data = true
+    expression  = local.q_elb_5xx
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+# ── ElastiCache alarms ─────────────────────────────────────────────────────
+# Unlike the ALB, the replication group IS a Terraform resource, so these
+# pin by dimension directly — no discovery tricks. ElastiCache emits
+# per-NODE metrics under CacheClusterId; with cluster mode disabled the
+# member nodes are named <replication_group_id>-001..-00N, and this stack's
+# single-node dev posture means -001 is the (only) primary. A multi-node
+# env (redis_num_cache_clusters > 1) would want these per member — accepted
+# single-node scope for now.
+locals {
+  redis_node_id = "${aws_elasticache_replication_group.redis.replication_group_id}-001"
+}
+
+# Memory first: the counter workload can't shrink (INCRBY forever, no TTL),
+# so memory creep is this cache's one guaranteed slow failure. Redis at
+# maxmemory with no eviction turns writes into errors — user-facing 500s.
+resource "aws_cloudwatch_metric_alarm" "redis_memory" {
+  alarm_name          = "${local.name}-redis-memory"
+  alarm_description   = "ElastiCache ${local.redis_node_id} memory above ${var.redis_memory_threshold_percent}% — the INCRBY counter only grows; sustained high memory ends in write errors."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  threshold           = var.redis_memory_threshold_percent
+  # Metrics lag node creation by a few minutes on a from-zero apply — that
+  # gap must read GREEN, same reasoning as the ALB alarms.
+  treat_missing_data = "notBreaching"
+
+  namespace   = "AWS/ElastiCache"
+  metric_name = "DatabaseMemoryUsagePercentage"
+  statistic   = "Average"
+  period      = 300
+  dimensions  = { CacheClusterId = local.redis_node_id }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+# EngineCPUUtilization (the Redis thread), not CPUUtilization (the host):
+# Redis is single-threaded, so the engine thread pegging is the real
+# saturation signal — host CPU on a 2-vCPU t4g.micro reads ~50% when the
+# engine is already at 100%.
+resource "aws_cloudwatch_metric_alarm" "redis_engine_cpu" {
+  alarm_name          = "${local.name}-redis-engine-cpu"
+  alarm_description   = "ElastiCache ${local.redis_node_id} engine CPU above ${var.redis_engine_cpu_threshold_percent}% — the single Redis thread is saturating; commands queue and latency climbs."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  threshold           = var.redis_engine_cpu_threshold_percent
+  treat_missing_data  = "notBreaching"
+
+  namespace   = "AWS/ElastiCache"
+  metric_name = "EngineCPUUtilization"
+  statistic   = "Average"
+  period      = 300
+  dimensions  = { CacheClusterId = local.redis_node_id }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
 # Saved Logs Insights queries — pre-canned console entry points into the 14
 # days of every pod's lines (folder ${local.name}/). Saving them WITH
 # log_group_names pre-selects the group when opened in the console.
 # kubectl logs stays the local/degraded path.
 resource "aws_cloudwatch_query_definition" "logs_p95_by_service" {
-  name            = "${local.name}/p95-by-service"
+  # "(pending JSON logs)" suffix: the caveat travels to the console — these
+  # queries return nothing until the JSON formatter lands (see the locals
+  # header). Drop the suffix in the same PR that ships JSON logs.
+  name            = "${local.name}/p95-by-service (pending JSON logs)"
   log_group_names = [aws_cloudwatch_log_group.container_insights["application"].name]
   query_string    = local.q_logs_p95
 }
 
 resource "aws_cloudwatch_query_definition" "logs_errors_recent" {
-  name            = "${local.name}/errors-recent"
+  name            = "${local.name}/errors-recent (pending JSON logs)"
   log_group_names = [aws_cloudwatch_log_group.container_insights["application"].name]
   query_string    = local.q_logs_errors
 }
@@ -193,7 +283,8 @@ resource "aws_cloudwatch_query_definition" "logs_volume_by_service" {
 }
 
 # Dashboard: ALB metrics (2x2 — signals that flow free) plus a request-log
-# row. Same Metrics Insights trick as the alarms for the ALB widgets — each
+# row and a Redis row (dimension-pinned — the replication group is in
+# state). Same Metrics Insights trick as the alarms for the ALB widgets — each
 # "metrics" entry is an expression object instead of a [namespace, name,
 # dim, value] tuple, so nothing needs the ALB's dimension pinned. The logs
 # row reads the application group through Logs Insights "log" widgets,
@@ -212,7 +303,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         properties = {
           title  = "Request Count (sum)"
           view   = "timeSeries"
-          region = var.region
+          region = data.aws_region.current.region
           metrics = [
             [{
               expression = local.q_requests
@@ -232,7 +323,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         properties = {
           title  = "Target Response Time (avg)"
           view   = "timeSeries"
-          region = var.region
+          region = data.aws_region.current.region
           metrics = [
             [{
               expression = local.q_avg_latency
@@ -252,7 +343,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         properties = {
           title  = "5xx (target + ELB)"
           view   = "timeSeries"
-          region = var.region
+          region = data.aws_region.current.region
           metrics = [
             [{
               expression = local.q_target_5xx
@@ -278,7 +369,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         properties = {
           title  = "Healthy Host Count (min)"
           view   = "timeSeries"
-          region = var.region
+          region = data.aws_region.current.region
           metrics = [
             [{
               expression = local.q_healthy_min
@@ -297,7 +388,7 @@ resource "aws_cloudwatch_dashboard" "alb" {
         height = 6
         properties = {
           title  = "App p95 from request logs (5m bins — fills when JSON logs land)"
-          region = var.region
+          region = data.aws_region.current.region
           view   = "timeSeries"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_p95_bin}"
         }
@@ -309,10 +400,42 @@ resource "aws_cloudwatch_dashboard" "alb" {
         width  = 12
         height = 6
         properties = {
-          title  = "Recent 5xx (request logs — empty is healthy)"
-          region = var.region
+          title  = "Recent 5xx (request logs — fills when JSON logs land)"
+          region = data.aws_region.current.region
           view   = "table"
           query  = "SOURCE '${aws_cloudwatch_log_group.container_insights["application"].name}' | ${local.q_logs_errors}"
+        }
+      },
+      # Redis row: the two alarm metrics, dimension-pinned to the single
+      # member node (see the ElastiCache alarms above for the -001 story).
+      {
+        type   = "metric"
+        x      = 0
+        y      = 18
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Redis Memory Usage (%)"
+          view   = "timeSeries"
+          region = data.aws_region.current.region
+          metrics = [
+            ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", local.redis_node_id]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 18
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Redis Engine CPU (%)"
+          view   = "timeSeries"
+          region = data.aws_region.current.region
+          metrics = [
+            ["AWS/ElastiCache", "EngineCPUUtilization", "CacheClusterId", local.redis_node_id]
+          ]
         }
       }
     ]
