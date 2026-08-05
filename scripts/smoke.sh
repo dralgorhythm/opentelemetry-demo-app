@@ -67,12 +67,23 @@ expect_contains() { # <desc> <needle> <url/curl args...>
   if [[ "$body" == *"$needle"* ]]; then ok "$desc"; else bad "$desc: no '$needle' in: $body"; fi
 }
 
-visitor_count() { # counter of the greeting ("…visitor number N"), or ""
+visitor_count() { # "<N>" | "" (answered, no greeting) | "curl-error" (never answered)
   # Anchored to the greeting phrase on purpose: a bare last-integer grab
   # would let digits in an error page (ALB "503 Service Temporarily
   # Unavailable" HTML) masquerade as a counter — empty output now means
   # "no greeting at all", distinct from a real non-increment.
-  curl -s --max-time 10 "http://$HOST/" | grep -oE 'visitor number [0-9]+' | grep -oE '[0-9]+' | tail -1 || true
+  #
+  # Retried like every other assert (run 30959094319: n1 read fine, n2 spent
+  # its full 10s max-time and came back empty, and the gate reported the
+  # rollout blip as "counter not monotonic" — a Redis verdict for a network
+  # event). Two reasons this needs its own body capture rather than piping
+  # curl into grep: the pipeline's exit status is grep's, so curl's failure
+  # was invisible, and "" then had to mean both "no greeting" and "no
+  # answer". A retry re-hits / and so re-increments, which is safe here —
+  # extra increments only push the later read higher.
+  local body
+  body=$(curl_retry "http://$HOST/") || { printf 'curl-error'; return 0; }
+  printf '%s' "$body" | grep -oE 'visitor number [0-9]+' | grep -oE '[0-9]+' | tail -1 || true
 }
 
 case "$mode" in
@@ -127,7 +138,12 @@ case "$mode" in
     # strictly increasing. (Two replicas share one ElastiCache primary —
     # monotonic across pods; concurrent visitors only push n2 higher.)
     n1=$(visitor_count); n2=$(visitor_count)
-    if [[ "$n1" =~ ^[0-9]+$ && "$n2" =~ ^[0-9]+$ && "$n2" -gt "$n1" ]]; then
+    if [[ "$n1" == "curl-error" || "$n2" == "curl-error" ]]; then
+      # Still red — three attempts failing is a real problem — but named for
+      # what happened. Blaming Redis for a request that never arrived sends
+      # whoever reads this log to the wrong dashboard.
+      bad "visitor counter unreadable: the ALB never answered / after 3 attempts (got '$n1' then '$n2') — edge/rollout, not the ElastiCache round trip"
+    elif [[ "$n1" =~ ^[0-9]+$ && "$n2" =~ ^[0-9]+$ && "$n2" -gt "$n1" ]]; then
       ok "visitor counter increments ($n1 -> $n2 — ElastiCache TLS+AUTH round trip)"
     else
       bad "visitor counter not monotonic (got '$n1' then '$n2')"
